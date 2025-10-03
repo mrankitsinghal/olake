@@ -1,0 +1,5 @@
+{"id": 1, "name": "John Doe", "email": "john.doe@example.com", "age": 30, "city": "New York", "salary": 75000.50, "is_active": true, "created_at": "2024-01-15"}
+{"id": 2, "name": "Jane Smith", "email": "jane.smith@example.com", "age": 25, "city": "Los Angeles", "salary": 68000.00, "is_active": true, "created_at": "2024-02-20"}
+{"id": 3, "name": "Bob Johnson", "email": "bob.j@example.com", "age": 45, "city": "Chicago", "salary": 95000.75, "is_active": false, "created_at": "2024-03-10"}
+{"id": 4, "name": "Alice Williams", "email": "alice.w@example.com", "age": 32, "city": "Houston", "salary": 82000.00, "is_active": true, "created_at": "2024-04-05"}
+{"id": 5, "name": "Charlie Brown", "email": "charlie.b@example.com", "age": 28, "city": "Phoenix", "salary": 71000.25, "is_active": true, "created_at": "2024-05-12"}
