@@ -1,6 +1,7 @@
 package driver
 
 import (
+	"bytes"
 	"context"
 	"encoding/csv"
 	"encoding/json"
@@ -15,6 +16,7 @@ import (
 	"github.com/datazip-inc/olake/drivers/abstract"
 	"github.com/datazip-inc/olake/types"
 	"github.com/datazip-inc/olake/utils/logger"
+	pq "github.com/parquet-go/parquet-go"
 )
 
 // GetOrSplitChunks returns chunks for parallel processing of files
@@ -255,8 +257,66 @@ func (s *S3) processJSONFile(ctx context.Context, reader io.Reader, processFn ab
 
 // processParquetFile reads and processes a Parquet file
 func (s *S3) processParquetFile(ctx context.Context, reader io.Reader, processFn abstract.BackfillMsgFn) error {
-	// TODO: Implement Parquet file processing
-	return fmt.Errorf("Parquet format support is not yet implemented")
+	// Read the entire parquet file into memory
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return fmt.Errorf("failed to read parquet file: %w", err)
+	}
+
+	// Create a parquet reader from bytes
+	pqFile := pq.NewGenericReader[map[string]any](bytes.NewReader(data))
+	defer pqFile.Close()
+
+	recordCount := 0
+	batch := make([]map[string]any, 0, s.config.BatchSize)
+
+	// Read records from parquet file
+	for {
+		// Check context cancellation
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		// Read next row
+		rows := make([]map[string]any, 1)
+		n, err := pqFile.Read(rows)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			logger.Warnf("Error reading parquet record %d: %v", recordCount, err)
+			continue
+		}
+		if n == 0 {
+			break
+		}
+
+		record := rows[0]
+		batch = append(batch, record)
+		recordCount++
+
+		// Process batch when it reaches the configured size
+		if len(batch) >= s.config.BatchSize {
+			for _, rec := range batch {
+				if err := processFn(ctx, rec); err != nil {
+					return fmt.Errorf("failed to process record: %w", err)
+				}
+			}
+			batch = batch[:0] // Reset batch
+		}
+	}
+
+	// Process remaining records in batch
+	for _, rec := range batch {
+		if err := processFn(ctx, rec); err != nil {
+			return fmt.Errorf("failed to process record: %w", err)
+		}
+	}
+
+	logger.Infof("Processed %d records from Parquet file", recordCount)
+	return nil
 }
 
 // convertValue converts a string value to the appropriate type

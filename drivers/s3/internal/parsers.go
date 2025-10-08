@@ -1,6 +1,7 @@
 package driver
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"encoding/csv"
@@ -14,6 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/datazip-inc/olake/types"
 	"github.com/datazip-inc/olake/utils/logger"
+	pq "github.com/parquet-go/parquet-go"
 )
 
 // inferCSVSchema reads the first few rows of a CSV file to infer the schema
@@ -178,9 +180,42 @@ func (s *S3) inferJSONSchema(ctx context.Context, stream *types.Stream, key stri
 
 // inferParquetSchema reads Parquet file schema
 func (s *S3) inferParquetSchema(ctx context.Context, stream *types.Stream, key string) (*types.Stream, error) {
-	// TODO: Implement Parquet schema inference
-	// This would require a Parquet library like github.com/xitongsys/parquet-go
-	return nil, fmt.Errorf("Parquet format support is not yet implemented")
+	logger.Infof("Inferring Parquet schema for file: %s", key)
+
+	// Get the object from S3
+	result, err := s.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(s.config.BucketName),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get object from S3: %w", err)
+	}
+	defer result.Body.Close()
+
+	// Read the parquet file content into memory
+	data, err := io.ReadAll(result.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read parquet file: %w", err)
+	}
+
+	// Create a parquet reader from bytes
+	pqFile := pq.NewGenericReader[map[string]any](bytes.NewReader(data))
+	defer pqFile.Close()
+
+	// Get the schema from parquet file
+	schema := pqFile.Schema()
+
+	// Convert parquet schema to Olake schema
+	for _, field := range schema.Fields() {
+		// Use string type for all fields for simplicity
+		// The parquet reader will handle the actual type conversions
+		stream.UpsertField(field.Name(), types.String, true)
+		stream.WithCursorField(field.Name())
+	}
+
+	logger.Infof("Inferred %d columns from Parquet file", len(schema.Fields()))
+
+	return stream, nil
 }
 
 // inferColumnType infers the data type of a CSV column from sample values

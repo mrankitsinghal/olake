@@ -6,11 +6,11 @@ S3 source connector for Olake that enables ingesting data from Amazon S3 or S3-c
 
 - ✅ CSV file support with header detection and type inference
 - ✅ JSON support (line-delimited and array formats)
+- ✅ Parquet file support with schema inference
 - ✅ Gzip compression support
 - ✅ Incremental sync with ETag-based change detection
 - ✅ Configurable file pattern filtering
 - ✅ Custom S3-compatible endpoints (MinIO, LocalStack)
-- 🔜 Parquet file support (planned)
 - 🔜 Large file chunking (planned)
 
 ## Configuration
@@ -183,14 +183,14 @@ The driver tracks synced files using ETags:
 ## Known Limitations
 
 1. **Large Files**: Currently treats each file as a single chunk. For very large files (>1GB), consider splitting them before upload.
-2. **Parquet Support**: Not yet implemented
-3. **Zip Compression**: Not yet implemented
-4. **IAM Role Auth**: Only access key/secret key authentication supported
+2. **Zip Compression**: Not yet implemented
+3. **IAM Role Auth**: Only access key/secret key authentication supported
+4. **Parquet Type Inference**: All parquet fields are currently read as strings for simplicity
 
 ## Backlog
 
 - [ ] Implement file chunking for large files (>1GB)
-- [ ] Add Parquet file format support
+- [ ] Improve Parquet type inference (currently all fields read as strings)
 - [ ] Add Zip compression support
 - [ ] Add IAM role-based authentication
 - [ ] Add support for S3 Select for filtered queries
