@@ -189,6 +189,22 @@ func TestConfigJSONDefaults(t *testing.T) {
 	assert.Equal(t, true, config.JSONLineDelimited)
 }
 
+func TestConfigParquetDefaults(t *testing.T) {
+	config := Config{
+		BucketName:      "test-bucket",
+		Region:          "us-east-1",
+		AccessKeyID:     "test-access-key",
+		SecretAccessKey: "test-secret-key",
+		FileFormat:      FormatParquet,
+	}
+
+	err := config.Validate()
+	assert.NoError(t, err)
+
+	// Parquet format doesn't need special defaults, just verify it validates
+	assert.Equal(t, FormatParquet, config.FileFormat)
+}
+
 func TestConfigPathPrefixNormalization(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -236,6 +252,26 @@ func TestConfigPathPrefixNormalization(t *testing.T) {
 			err := config.Validate()
 			assert.NoError(t, err)
 			assert.Equal(t, tt.expectedPrefix, config.PathPrefix)
+		})
+	}
+}
+
+func TestConfigAllFileFormats(t *testing.T) {
+	formats := []FileFormat{FormatCSV, FormatJSON, FormatParquet}
+
+	for _, format := range formats {
+		t.Run(string(format), func(t *testing.T) {
+			config := Config{
+				BucketName:      "test-bucket",
+				Region:          "us-east-1",
+				AccessKeyID:     "test-access-key",
+				SecretAccessKey: "test-secret-key",
+				FileFormat:      format,
+			}
+
+			err := config.Validate()
+			assert.NoError(t, err)
+			assert.Equal(t, format, config.FileFormat)
 		})
 	}
 }

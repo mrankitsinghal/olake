@@ -12,6 +12,13 @@ echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}  Olake S3 Driver - Test Suite${NC}"
 echo -e "${GREEN}========================================${NC}"
 
+# Generate parquet test file if it doesn't exist
+if [ ! -f "testdata/sample.parquet" ]; then
+    echo -e "\n${YELLOW}Generating sample.parquet test file...${NC}"
+    cd testdata && go run create_parquet.go && cd ..
+    echo -e "${GREEN}✓ Generated sample.parquet${NC}"
+fi
+
 # Step 1: Start MinIO
 echo -e "\n${YELLOW}[1/6] Starting MinIO...${NC}"
 docker-compose up -d
@@ -34,9 +41,11 @@ docker exec olake-s3-test-minio mc mb mylocal/olake-output 2>&1 || echo "Bucket 
 echo -e "${YELLOW}Uploading test files...${NC}"
 docker cp testdata/sample.csv olake-s3-test-minio:/tmp/
 docker cp testdata/sample.json olake-s3-test-minio:/tmp/
+docker cp testdata/sample.parquet olake-s3-test-minio:/tmp/
 
 docker exec olake-s3-test-minio mc cp /tmp/sample.csv mylocal/olake-test-bucket/data/sample.csv
 docker exec olake-s3-test-minio mc cp /tmp/sample.json mylocal/olake-test-bucket/data/sample.json
+docker exec olake-s3-test-minio mc cp /tmp/sample.parquet mylocal/olake-test-bucket/data/sample.parquet
 
 # Verify files were uploaded
 echo -e "${YELLOW}Verifying uploaded files...${NC}"
