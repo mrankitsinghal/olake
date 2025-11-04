@@ -9,62 +9,91 @@ import (
 	"github.com/datazip-inc/olake/utils/logger"
 )
 
-// StreamIncrementalChanges processes only new or modified files since last sync
-func (s *S3) StreamIncrementalChanges(ctx context.Context, stream types.StreamInterface, cb abstract.BackfillMsgFn) error {
+// FetchMaxCursorValues returns the maximum LastModified timestamp for all files in the stream
+func (s *S3) FetchMaxCursorValues(ctx context.Context, stream types.StreamInterface) (any, any, error) {
 	streamName := stream.Name()
-	logger.Infof("Checking for incremental changes for file: %s", streamName)
+	files, exists := s.discoveredFiles[streamName]
+	if !exists || len(files) == 0 {
+		logger.Warnf("No files found for stream %s during cursor fetch", streamName)
+		return nil, nil, nil
+	}
 
-	// Get the file object
-	var fileObj *FileObject
-	for i := range s.discoveredFiles {
-		if s.discoveredFiles[i].FileKey == streamName {
-			fileObj = &s.discoveredFiles[i]
-			break
+	// Find the latest LastModified timestamp among all files in this stream
+	var maxLastModified string
+	for _, file := range files {
+		if file.LastModified > maxLastModified {
+			maxLastModified = file.LastModified
 		}
 	}
 
-	if fileObj == nil {
-		return fmt.Errorf("file not found: %s", streamName)
+	logger.Debugf("Max LastModified for stream %s: %s (%d files)", streamName, maxLastModified, len(files))
+
+	// Return as primary cursor (secondary cursor not used for S3)
+	return maxLastModified, nil, nil
+}
+
+// StreamIncrementalChanges processes only new or modified files since last sync
+func (s *S3) StreamIncrementalChanges(ctx context.Context, stream types.StreamInterface, cb abstract.BackfillMsgFn) error {
+	streamName := stream.Name()
+	files, exists := s.discoveredFiles[streamName]
+	if !exists || len(files) == 0 {
+		return fmt.Errorf("no files found for stream: %s", streamName)
 	}
+
+	logger.Infof("Checking for incremental changes for stream: %s (%d files)", streamName, len(files))
 
 	// Get configured stream to access state
 	configuredStream, ok := stream.(*types.ConfiguredStream)
 	if !ok {
-		logger.Warnf("Failed to cast to ConfiguredStream, treating as new file")
-		return s.ChunkIterator(ctx, stream, types.Chunk{Min: streamName, Max: nil}, cb)
+		logger.Warnf("Failed to cast to ConfiguredStream, syncing all files")
+		return s.syncAllFiles(ctx, stream, files, cb)
 	}
 
-	// Get last synced ETag from state
-	lastSyncedETag := s.state.GetCursor(configuredStream, "last_etag")
-	if lastSyncedETag == nil {
-		// No previous state, this is the first sync - treat as backfill
-		logger.Infof("No previous state found for %s, treating as new file", streamName)
-		// Process the file
-		err := s.ChunkIterator(ctx, stream, types.Chunk{Min: streamName, Max: nil}, cb)
-		if err != nil {
-			return err
+	// Get last synced timestamp from state (primary cursor)
+	primaryCursor, _ := configuredStream.Cursor()
+	lastSyncedTimestamp := s.state.GetCursor(configuredStream, primaryCursor)
+
+	if lastSyncedTimestamp == nil {
+		// First sync - process all files
+		logger.Infof("No previous state for stream %s, syncing all %d files", streamName, len(files))
+		return s.syncAllFiles(ctx, stream, files, cb)
+	}
+
+	// Parse last synced timestamp
+	lastSynced, ok := lastSyncedTimestamp.(string)
+	if !ok {
+		logger.Warnf("Invalid cursor format in state for stream %s, syncing all files", streamName)
+		return s.syncAllFiles(ctx, stream, files, cb)
+	}
+
+	// Filter files modified after last sync
+	var filesToSync []FileObject
+	for _, file := range files {
+		if file.LastModified > lastSynced {
+			filesToSync = append(filesToSync, file)
+			logger.Debugf("File %s modified (%s > %s), will sync", file.FileKey, file.LastModified, lastSynced)
 		}
-		// Save state after successful sync
-		s.state.SetCursor(configuredStream, "last_etag", fileObj.ETag)
-		s.state.SetCursor(configuredStream, "last_modified", fileObj.LastModified)
+	}
+
+	if len(filesToSync) == 0 {
+		logger.Infof("No new or modified files for stream %s (last synced: %s)", streamName, lastSynced)
 		return nil
 	}
 
-	// Compare ETags
-	lastETag, ok := lastSyncedETag.(string)
-	if ok && lastETag == fileObj.ETag {
-		logger.Infof("File %s has not changed (ETag match), skipping", streamName)
-		return nil
+	logger.Infof("Syncing %d modified files for stream %s (out of %d total)", len(filesToSync), streamName, len(files))
+	return s.syncAllFiles(ctx, stream, filesToSync, cb)
+}
+
+// syncAllFiles processes a list of files sequentially
+func (s *S3) syncAllFiles(ctx context.Context, stream types.StreamInterface, files []FileObject, cb abstract.BackfillMsgFn) error {
+	for i, file := range files {
+		logger.Infof("Processing file %d/%d: %s", i+1, len(files), file.FileKey)
+
+		chunk := types.Chunk{Min: file.FileKey, Max: nil}
+		if err := s.ChunkIterator(ctx, stream, chunk, cb); err != nil {
+			return fmt.Errorf("failed to process file %s: %w", file.FileKey, err)
+		}
 	}
 
-	logger.Infof("File %s has changed (ETag mismatch: %s != %s), syncing", streamName, lastETag, fileObj.ETag)
-	// Process the file
-	err := s.ChunkIterator(ctx, stream, types.Chunk{Min: streamName, Max: nil}, cb)
-	if err != nil {
-		return err
-	}
-	// Update state after successful sync
-	s.state.SetCursor(configuredStream, "last_etag", fileObj.ETag)
-	s.state.SetCursor(configuredStream, "last_modified", fileObj.LastModified)
 	return nil
 }

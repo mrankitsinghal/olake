@@ -21,7 +21,7 @@ type S3 struct {
 	config          *Config
 	state           *types.State
 	filePattern     *regexp.Regexp
-	discoveredFiles []FileObject
+	discoveredFiles map[string][]FileObject // map[streamName][]files
 }
 
 // GetConfigRef returns a reference to the config struct
@@ -131,7 +131,8 @@ func (s *S3) MaxRetries() int {
 func (s *S3) GetStreamNames(ctx context.Context) ([]string, error) {
 	logger.Infof("Discovering files in bucket: %s with prefix: %s", s.config.BucketName, s.config.PathPrefix)
 
-	var files []FileObject
+	// Initialize the map for grouped files
+	filesByStream := make(map[string][]FileObject)
 	var continuationToken *string
 
 	// List all objects with the given prefix
@@ -168,12 +169,16 @@ func (s *S3) GetStreamNames(ctx context.Context) ([]string, error) {
 				continue
 			}
 
-			files = append(files, FileObject{
+			fileObj := FileObject{
 				FileKey:      key,
 				Size:         aws.ToInt64(obj.Size),
 				LastModified: obj.LastModified.Format("2006-01-02T15:04:05Z"),
 				ETag:         strings.Trim(aws.ToString(obj.ETag), "\""),
-			})
+			}
+
+			// Group files by stream name (folder or individual file)
+			streamName := s.extractStreamName(key)
+			filesByStream[streamName] = append(filesByStream[streamName], fileObj)
 		}
 
 		// Check if there are more results
@@ -183,16 +188,64 @@ func (s *S3) GetStreamNames(ctx context.Context) ([]string, error) {
 		continuationToken = result.NextContinuationToken
 	}
 
-	logger.Infof("Discovered %d files matching criteria", len(files))
-	s.discoveredFiles = files
+	// Store grouped files
+	s.discoveredFiles = filesByStream
 
-	// Return file keys as stream names
-	streamNames := make([]string, len(files))
-	for i, file := range files {
-		streamNames[i] = file.FileKey
+	// Extract stream names
+	streamNames := make([]string, 0, len(filesByStream))
+	totalFiles := 0
+	for streamName, files := range filesByStream {
+		streamNames = append(streamNames, streamName)
+		totalFiles += len(files)
+	}
+
+	logger.Infof("Discovered %d files in %d streams", totalFiles, len(streamNames))
+	if s.config.StreamGroupingEnabled {
+		logger.Infof("Stream grouping enabled at level %d", s.config.StreamGroupingLevel)
 	}
 
 	return streamNames, nil
+}
+
+// extractStreamName extracts the stream name from a file key based on grouping configuration
+func (s *S3) extractStreamName(key string) string {
+	if !s.config.StreamGroupingEnabled {
+		// No grouping - each file is its own stream
+		return key
+	}
+
+	// Remove path_prefix from the key to get relative path
+	relativePath := key
+	if s.config.PathPrefix != "" {
+		relativePath = strings.TrimPrefix(key, s.config.PathPrefix)
+		relativePath = strings.TrimPrefix(relativePath, "/")
+	}
+
+	// Handle edge case: empty relative path after prefix removal
+	if relativePath == "" {
+		logger.Warnf("File %s has empty relative path after prefix removal, using full key", key)
+		return key
+	}
+
+	// Split by / and take first N levels based on StreamGroupingLevel
+	parts := strings.Split(relativePath, "/")
+	if len(parts) == 0 {
+		logger.Warnf("File %s produced no path parts, using full key", key)
+		return key
+	}
+
+	// If file is at or below grouping level, use the path up to that level
+	if len(parts) <= s.config.StreamGroupingLevel {
+		// If only one part (no folders), use the first part
+		if len(parts) == 1 {
+			return parts[0]
+		}
+		// Use all parts except the filename
+		return strings.Join(parts[:len(parts)-1], "/")
+	}
+
+	// Take the first N levels as stream name
+	return strings.Join(parts[:s.config.StreamGroupingLevel], "/")
 }
 
 // matchesFileFormat checks if a file key matches the configured file format
@@ -214,37 +267,62 @@ func (s *S3) matchesFileFormat(key string) bool {
 	}
 }
 
-// ProduceSchema generates schema for a given file (stream)
+// ProduceSchema generates schema for a given stream (folder or file)
 func (s *S3) ProduceSchema(ctx context.Context, streamName string) (*types.Stream, error) {
-	logger.Infof("Producing schema for file: %s", streamName)
+	logger.Infof("Producing schema for stream: %s", streamName)
 
-	// Create stream with file key as name
+	// Get files for this stream
+	files, exists := s.discoveredFiles[streamName]
+	if !exists || len(files) == 0 {
+		return nil, fmt.Errorf("no files found for stream: %s", streamName)
+	}
+
+	// Create stream
 	stream := types.NewStream(streamName, "s3", &s.config.BucketName)
 
-	// Get file object for metadata
-	var fileObj *FileObject
-	for _, obj := range s.discoveredFiles {
-		if obj.FileKey == streamName {
-			fileObj = &obj
-			break
+	// Check if schema needs to be re-inferred
+	needsReinference := s.shouldReinferSchema(streamName, files)
+
+	if !needsReinference {
+		// Try to load schema from cache
+		cachedStream, err := s.loadSchemaFromState(stream, streamName)
+		if err == nil {
+			return cachedStream, nil
 		}
+		// If loading fails, fall through to inference
+		logger.Warnf("Failed to load cached schema for stream %s: %v, will infer", streamName, err)
 	}
 
-	if fileObj == nil {
-		return nil, fmt.Errorf("file not found in discovered files: %s", streamName)
-	}
+	// Infer schema from the first file in the stream
+	firstFile := files[0]
+	logger.Infof("Inferring schema from file: %s (%d files in stream)", firstFile.FileKey, len(files))
+
+	var inferredStream *types.Stream
+	var err error
 
 	// Infer schema based on file format
 	switch s.config.FileFormat {
 	case FormatCSV:
-		return s.inferCSVSchema(ctx, stream, streamName)
+		inferredStream, err = s.inferCSVSchema(ctx, stream, firstFile.FileKey)
 	case FormatJSON:
-		return s.inferJSONSchema(ctx, stream, streamName)
+		inferredStream, err = s.inferJSONSchema(ctx, stream, firstFile.FileKey)
 	case FormatParquet:
-		return s.inferParquetSchema(ctx, stream, streamName)
+		inferredStream, err = s.inferParquetSchema(ctx, stream, firstFile.FileKey)
 	default:
 		return nil, fmt.Errorf("unsupported file format: %s", s.config.FileFormat)
 	}
+
+	if err != nil {
+		return nil, err
+	}
+
+	// Cache the inferred schema
+	if cacheErr := s.cacheSchema(inferredStream, streamName, files); cacheErr != nil {
+		logger.Warnf("Failed to cache schema for stream %s: %v", streamName, cacheErr)
+		// Don't fail the operation if caching fails
+	}
+
+	return inferredStream, nil
 }
 
 // CDCSupported returns false as S3 does not support CDC

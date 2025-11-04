@@ -198,9 +198,11 @@ func (s *S3) inferParquetSchema(ctx context.Context, stream *types.Stream, key s
 		return nil, fmt.Errorf("failed to read parquet file: %w", err)
 	}
 
-	// Create a parquet reader from bytes
-	pqFile := pq.NewGenericReader[map[string]any](bytes.NewReader(data))
-	defer pqFile.Close()
+	// Open parquet file to read schema
+	pqFile, err := pq.OpenFile(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return nil, fmt.Errorf("failed to open parquet file: %w", err)
+	}
 
 	// Get the schema from parquet file
 	schema := pqFile.Schema()
@@ -332,4 +334,162 @@ func (s *S3) getReader(body io.Reader, key string) (io.Reader, error) {
 
 	// TODO: Add support for zip compression if needed
 	return body, nil
+}
+
+// SchemaCache represents cached schema metadata
+type SchemaCache struct {
+	Fields          map[string]types.DataType `json:"fields"`
+	CursorFields    []string                  `json:"cursor_fields"`
+	CachedAt        string                    `json:"cached_at"`         // Timestamp when schema was cached
+	MaxLastModified string                    `json:"max_last_modified"` // Max LastModified of files when schema was cached
+}
+
+// shouldReinferSchema checks if schema needs to be re-inferred
+// Returns true if no cached schema exists or if files have been modified since caching
+func (s *S3) shouldReinferSchema(streamName string, files []FileObject) bool {
+	// No state available
+	if s.state == nil {
+		return true
+	}
+
+	// Get cached schema from state
+	cacheKey := fmt.Sprintf("schema_cache_%s", streamName)
+	tempStream := types.NewStream(streamName, "s3", &s.config.BucketName)
+	cachedData := s.state.GetCursor(&types.ConfiguredStream{
+		Stream: tempStream,
+	}, cacheKey)
+
+	if cachedData == nil {
+		logger.Debugf("No cached schema found for stream %s, will infer", streamName)
+		return true
+	}
+
+	// Parse cached schema
+	cachedJSON, ok := cachedData.(string)
+	if !ok {
+		logger.Warnf("Invalid cached schema format for stream %s, will re-infer", streamName)
+		return true
+	}
+
+	var cache SchemaCache
+	if err := json.Unmarshal([]byte(cachedJSON), &cache); err != nil {
+		logger.Warnf("Failed to unmarshal cached schema for stream %s: %v, will re-infer", streamName, err)
+		return true
+	}
+
+	// Find max LastModified from current files
+	var maxLastModified string
+	for _, file := range files {
+		if file.LastModified > maxLastModified {
+			maxLastModified = file.LastModified
+		}
+	}
+
+	// Compare with cached max LastModified
+	if maxLastModified > cache.MaxLastModified {
+		logger.Infof("Files modified since schema cache for stream %s (cached: %s, current: %s), will re-infer",
+			streamName, cache.MaxLastModified, maxLastModified)
+		return true
+	}
+
+	logger.Debugf("Using cached schema for stream %s (cached at: %s)", streamName, cache.CachedAt)
+	return false
+}
+
+// loadSchemaFromState loads cached schema from state and applies it to the stream
+func (s *S3) loadSchemaFromState(stream *types.Stream, streamName string) (*types.Stream, error) {
+	cacheKey := fmt.Sprintf("schema_cache_%s", streamName)
+	tempStream := types.NewStream(streamName, "s3", &s.config.BucketName)
+	cachedData := s.state.GetCursor(&types.ConfiguredStream{
+		Stream: tempStream,
+	}, cacheKey)
+
+	if cachedData == nil {
+		return nil, fmt.Errorf("no cached schema found for stream %s", streamName)
+	}
+
+	cachedJSON, ok := cachedData.(string)
+	if !ok {
+		return nil, fmt.Errorf("invalid cached schema format for stream %s", streamName)
+	}
+
+	var cache SchemaCache
+	if err := json.Unmarshal([]byte(cachedJSON), &cache); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal cached schema: %w", err)
+	}
+
+	// Apply cached fields to stream
+	for fieldName, dataType := range cache.Fields {
+		stream.UpsertField(fieldName, dataType, true) // Allow nulls by default
+	}
+
+	// Apply cursor fields
+	for _, cursorField := range cache.CursorFields {
+		stream.WithCursorField(cursorField)
+	}
+
+	logger.Infof("Loaded cached schema for stream %s with %d fields", streamName, len(cache.Fields))
+	return stream, nil
+}
+
+// cacheSchema stores the stream schema in state for future use
+func (s *S3) cacheSchema(stream *types.Stream, streamName string, files []FileObject) error {
+	if s.state == nil {
+		return nil // No state to cache to
+	}
+
+	// Find max LastModified from files
+	var maxLastModified string
+	for _, file := range files {
+		if file.LastModified > maxLastModified {
+			maxLastModified = file.LastModified
+		}
+	}
+
+	// Build schema cache
+	cache := SchemaCache{
+		Fields:          make(map[string]types.DataType),
+		CursorFields:    []string{},
+		CachedAt:        maxLastModified, // Use max LastModified as cache timestamp
+		MaxLastModified: maxLastModified,
+	}
+
+	// Extract fields from stream schema
+	if stream.Schema != nil {
+		stream.Schema.Properties.Range(func(key, value interface{}) bool {
+			fieldName, ok := key.(string)
+			if !ok {
+				return true
+			}
+			prop, ok := value.(*types.Property)
+			if !ok {
+				return true
+			}
+			cache.Fields[fieldName] = prop.DataType()
+			return true
+		})
+	}
+
+	// Extract cursor fields
+	if stream.AvailableCursorFields != nil {
+		for _, cursorField := range stream.AvailableCursorFields.Array() {
+			cache.CursorFields = append(cache.CursorFields, cursorField)
+		}
+	}
+
+	// Serialize to JSON
+	cacheJSON, err := json.Marshal(cache)
+	if err != nil {
+		return fmt.Errorf("failed to marshal schema cache: %w", err)
+	}
+
+	// Store in state
+	cacheKey := fmt.Sprintf("schema_cache_%s", streamName)
+	tempStream := types.NewStream(streamName, "s3", &s.config.BucketName)
+	s.state.SetCursor(&types.ConfiguredStream{
+		Stream: tempStream,
+	}, cacheKey, string(cacheJSON))
+
+	logger.Infof("Cached schema for stream %s with %d fields", streamName, len(cache.Fields))
+	return nil
 }

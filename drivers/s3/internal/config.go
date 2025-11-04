@@ -55,6 +55,11 @@ type Config struct {
 
 	// File filtering
 	FilePattern string `json:"file_pattern"` // Regex pattern to filter files (optional)
+
+	// Stream grouping strategy
+	StreamGroupingEnabled bool   `json:"stream_grouping_enabled"` // Default: true - groups files by folder
+	StreamGroupingLevel   int    `json:"stream_grouping_level"`   // Folder depth for grouping (default: 1)
+	StreamPattern         string `json:"stream_pattern"`          // Regex pattern for custom grouping (Phase 2)
 }
 
 // Validate validates the S3 configuration
@@ -146,6 +151,17 @@ func (c *Config) Validate() error {
 	// Normalize path prefix (remove leading/trailing slashes)
 	if c.PathPrefix != "" {
 		c.PathPrefix = strings.Trim(c.PathPrefix, "/")
+	}
+
+	// Stream grouping defaults
+	// Default to enabled for folder-based stream grouping
+	if !c.StreamGroupingEnabled {
+		c.StreamGroupingEnabled = true
+	}
+
+	// Validate and set default grouping level
+	if c.StreamGroupingLevel <= 0 {
+		c.StreamGroupingLevel = 1
 	}
 
 	return nil

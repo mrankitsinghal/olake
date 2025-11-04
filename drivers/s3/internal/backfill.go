@@ -22,45 +22,50 @@ import (
 // GetOrSplitChunks returns chunks for parallel processing of files
 // For S3, we treat each file as a single chunk (no splitting within files for now)
 func (s *S3) GetOrSplitChunks(ctx context.Context, pool *destination.WriterPool, stream types.StreamInterface) (*types.Set[types.Chunk], error) {
-	// Each file is one chunk
+	streamName := stream.Name()
+	files, exists := s.discoveredFiles[streamName]
+
+	if !exists || len(files) == 0 {
+		logger.Warnf("No files found for stream %s, returning empty chunk set", streamName)
+		return types.NewSet[types.Chunk](), nil
+	}
+
 	chunks := types.NewSet[types.Chunk]()
 
-	// The stream name is the S3 key
-	streamName := stream.Name()
-
-	// Find the file object
-	var fileObj *FileObject
-	for i := range s.discoveredFiles {
-		if s.discoveredFiles[i].FileKey == streamName {
-			fileObj = &s.discoveredFiles[i]
-			break
-		}
+	// Estimate total row count across all files in the stream
+	var totalSize int64
+	for _, file := range files {
+		totalSize += file.Size
 	}
 
-	if fileObj == nil {
-		return nil, fmt.Errorf("file not found: %s", streamName)
-	}
-
-	// Add estimated row count to stats (rough estimate based on file size)
 	// Assuming average row size of 100 bytes for estimation
-	estimatedRows := fileObj.Size / 100
+	estimatedRows := totalSize / 100
 	if estimatedRows < 1 {
 		estimatedRows = 1
 	}
 	pool.AddRecordsToSyncStats(estimatedRows)
 
-	// Create a single chunk for the entire file
-	chunks.Insert(types.Chunk{
-		Min: streamName, // Start of file
-		Max: nil,        // End of file
-	})
+	logger.Infof("Creating %d chunks for stream %s (total size: %d bytes, estimated rows: %d)",
+		len(files), streamName, totalSize, estimatedRows)
+
+	// Create one chunk per file (Phase 1 - no file splitting)
+	for _, file := range files {
+		chunks.Insert(types.Chunk{
+			Min: file.FileKey, // File key as chunk identifier
+			Max: nil,          // Single chunk per file
+		})
+	}
 
 	return chunks, nil
 }
 
 // ChunkIterator reads and processes records from an S3 file
 func (s *S3) ChunkIterator(ctx context.Context, stream types.StreamInterface, chunk types.Chunk, processFn abstract.BackfillMsgFn) error {
-	key := chunk.Min.(string)
+	key, ok := chunk.Min.(string)
+	if !ok {
+		return fmt.Errorf("invalid chunk Min type: expected string, got %T", chunk.Min)
+	}
+
 	logger.Infof("Processing file: %s", key)
 
 	// Get the object from S3
@@ -69,6 +74,11 @@ func (s *S3) ChunkIterator(ctx context.Context, stream types.StreamInterface, ch
 		Key:    aws.String(key),
 	})
 	if err != nil {
+		// Check if file was deleted between discovery and processing
+		if strings.Contains(err.Error(), "NoSuchKey") || strings.Contains(err.Error(), "NotFound") {
+			logger.Warnf("File %s was deleted or not found, skipping", key)
+			return nil // Don't fail the entire sync for a missing file
+		}
 		return fmt.Errorf("failed to get object from S3: %w", err)
 	}
 	defer result.Body.Close()
@@ -257,20 +267,25 @@ func (s *S3) processJSONFile(ctx context.Context, reader io.Reader, processFn ab
 
 // processParquetFile reads and processes a Parquet file
 func (s *S3) processParquetFile(ctx context.Context, reader io.Reader, processFn abstract.BackfillMsgFn) error {
-	// Read the entire parquet file into memory
+	// Read all data into memory (required for parquet-go)
 	data, err := io.ReadAll(reader)
 	if err != nil {
-		return fmt.Errorf("failed to read parquet file: %w", err)
+		return fmt.Errorf("failed to read parquet data: %w", err)
 	}
 
-	// Create a parquet reader from bytes
-	pqFile := pq.NewGenericReader[map[string]any](bytes.NewReader(data))
-	defer pqFile.Close()
+	// Open parquet file
+	pqFile, err := pq.OpenFile(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return fmt.Errorf("failed to open parquet file: %w", err)
+	}
+
+	// Create a generic reader for map[string]interface{}
+	pqReader := pq.NewGenericReader[map[string]interface{}](pqFile)
+	defer pqReader.Close()
 
 	recordCount := 0
-	batch := make([]map[string]any, 0, s.config.BatchSize)
-
-	// Read records from parquet file
+	// Read records one by one
+	records := make([]map[string]interface{}, 1)
 	for {
 		// Check context cancellation
 		select {
@@ -279,40 +294,20 @@ func (s *S3) processParquetFile(ctx context.Context, reader io.Reader, processFn
 		default:
 		}
 
-		// Read next row
-		rows := make([]map[string]any, 1)
-		n, err := pqFile.Read(rows)
-		if err == io.EOF {
+		// Read next record
+		n, err := pqReader.Read(records)
+		if err == io.EOF || n == 0 {
 			break
 		}
 		if err != nil {
-			logger.Warnf("Error reading parquet record %d: %v", recordCount, err)
-			continue
-		}
-		if n == 0 {
-			break
+			return fmt.Errorf("failed to read parquet record: %w", err)
 		}
 
-		record := rows[0]
-		batch = append(batch, record)
-		recordCount++
-
-		// Process batch when it reaches the configured size
-		if len(batch) >= s.config.BatchSize {
-			for _, rec := range batch {
-				if err := processFn(ctx, rec); err != nil {
-					return fmt.Errorf("failed to process record: %w", err)
-				}
-			}
-			batch = batch[:0] // Reset batch
-		}
-	}
-
-	// Process remaining records in batch
-	for _, rec := range batch {
-		if err := processFn(ctx, rec); err != nil {
+		// Process the record
+		if err := processFn(ctx, records[0]); err != nil {
 			return fmt.Errorf("failed to process record: %w", err)
 		}
+		recordCount++
 	}
 
 	logger.Infof("Processed %d records from Parquet file", recordCount)
