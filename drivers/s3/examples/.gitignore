@@ -13,4 +13,4 @@ user_id.txt
 # Temporary files
 *.log
 *.tmp
-
+catalog_*.json
