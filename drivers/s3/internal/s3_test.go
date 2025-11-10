@@ -2,7 +2,6 @@ package driver
 
 import (
 	"context"
-	"encoding/json"
 	"testing"
 
 	"github.com/datazip-inc/olake/types"
@@ -293,33 +292,4 @@ func TestFetchMaxCursorValues(t *testing.T) {
 	}
 }
 
-// TestSchemaCache tests schema caching logic
-func TestSchemaCacheStruct(t *testing.T) {
-	// Test SchemaCache JSON serialization
-	cache := SchemaCache{
-		Fields: map[string]types.DataType{
-			"id":    types.Int64,
-			"name":  types.String,
-			"email": types.String,
-		},
-		CursorFields:    []string{"id", "name"},
-		CachedAt:        "2024-01-01T10:00:00Z",
-		MaxLastModified: "2024-01-01T10:00:00Z",
-	}
-
-	// Marshal to JSON
-	jsonData, err := json.Marshal(cache)
-	require.NoError(t, err)
-	assert.NotEmpty(t, jsonData)
-
-	// Unmarshal back
-	var decoded SchemaCache
-	err = json.Unmarshal(jsonData, &decoded)
-	require.NoError(t, err)
-
-	assert.Equal(t, cache.Fields, decoded.Fields)
-	assert.Equal(t, cache.CursorFields, decoded.CursorFields)
-	assert.Equal(t, cache.CachedAt, decoded.CachedAt)
-	assert.Equal(t, cache.MaxLastModified, decoded.MaxLastModified)
-}
 

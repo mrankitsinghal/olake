@@ -117,6 +117,11 @@ func (s *S3) SetupState(state *types.State) {
 	s.state = state
 }
 
+// StateType returns the type of state management this driver uses
+func (s *S3) StateType() types.StateType {
+	return types.StreamType
+}
+
 // MaxConnections returns the maximum number of concurrent connections
 func (s *S3) MaxConnections() int {
 	return s.config.MaxThreads
@@ -280,19 +285,6 @@ func (s *S3) ProduceSchema(ctx context.Context, streamName string) (*types.Strea
 	// Create stream
 	stream := types.NewStream(streamName, "s3", &s.config.BucketName)
 
-	// Check if schema needs to be re-inferred
-	needsReinference := s.shouldReinferSchema(streamName, files)
-
-	if !needsReinference {
-		// Try to load schema from cache
-		cachedStream, err := s.loadSchemaFromState(stream, streamName)
-		if err == nil {
-			return cachedStream, nil
-		}
-		// If loading fails, fall through to inference
-		logger.Warnf("Failed to load cached schema for stream %s: %v, will infer", streamName, err)
-	}
-
 	// Infer schema from the first file in the stream
 	firstFile := files[0]
 	logger.Infof("Inferring schema from file: %s (%d files in stream)", firstFile.FileKey, len(files))
@@ -314,12 +306,6 @@ func (s *S3) ProduceSchema(ctx context.Context, streamName string) (*types.Strea
 
 	if err != nil {
 		return nil, err
-	}
-
-	// Cache the inferred schema
-	if cacheErr := s.cacheSchema(inferredStream, streamName, files); cacheErr != nil {
-		logger.Warnf("Failed to cache schema for stream %s: %v", streamName, cacheErr)
-		// Don't fail the operation if caching fails
 	}
 
 	return inferredStream, nil

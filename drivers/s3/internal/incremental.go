@@ -12,9 +12,9 @@ import (
 // FetchMaxCursorValues returns the maximum LastModified timestamp for all files in the stream
 func (s *S3) FetchMaxCursorValues(ctx context.Context, stream types.StreamInterface) (any, any, error) {
 	streamName := stream.Name()
+	
 	files, exists := s.discoveredFiles[streamName]
 	if !exists || len(files) == 0 {
-		logger.Warnf("No files found for stream %s during cursor fetch", streamName)
 		return nil, nil, nil
 	}
 
@@ -25,8 +25,6 @@ func (s *S3) FetchMaxCursorValues(ctx context.Context, stream types.StreamInterf
 			maxLastModified = file.LastModified
 		}
 	}
-
-	logger.Debugf("Max LastModified for stream %s: %s (%d files)", streamName, maxLastModified, len(files))
 
 	// Return as primary cursor (secondary cursor not used for S3)
 	return maxLastModified, nil, nil

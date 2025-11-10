@@ -279,40 +279,105 @@ func (s *S3) processParquetFile(ctx context.Context, reader io.Reader, processFn
 		return fmt.Errorf("failed to open parquet file: %w", err)
 	}
 
-	// Create a generic reader for map[string]interface{}
-	pqReader := pq.NewGenericReader[map[string]interface{}](pqFile)
-	defer pqReader.Close()
-
+	// Get schema to know column names
+	schema := pqFile.Schema()
+	fields := schema.Fields()
+	columnNames := make([]string, len(fields))
+	for i, field := range fields {
+		columnNames[i] = field.Name()
+	}
+	
 	recordCount := 0
-	// Read records one by one
-	records := make([]map[string]interface{}, 1)
-	for {
-		// Check context cancellation
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
 
-		// Read next record
-		n, err := pqReader.Read(records)
-		if err == io.EOF || n == 0 {
-			break
+	// Iterate through all row groups
+	for _, rowGroup := range pqFile.RowGroups() {
+		numRows := rowGroup.NumRows()
+		
+		// Read all columns into memory for this row group
+		columnData := make([][]pq.Value, len(fields))
+		for colIdx, columnChunk := range rowGroup.ColumnChunks() {
+			// Read all values from this column
+			pages := columnChunk.Pages()
+			columnValues := make([]pq.Value, 0, numRows)
+			
+			for {
+				page, err := pages.ReadPage()
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					return fmt.Errorf("failed to read page: %w", err)
+				}
+				
+				// Read values from the page
+				pageValues := make([]pq.Value, page.NumValues())
+				_, err = page.Values().ReadValues(pageValues)
+				if err != nil && err != io.EOF {
+					return fmt.Errorf("failed to read page values: %w", err)
+				}
+				
+				columnValues = append(columnValues, pageValues...)
+			}
+			pages.Close()
+			
+			columnData[colIdx] = columnValues
 		}
-		if err != nil {
-			return fmt.Errorf("failed to read parquet record: %w", err)
-		}
+		
+		// Now process row by row
+		for rowIdx := int64(0); rowIdx < numRows; rowIdx++ {
+			// Check context cancellation
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
 
-		// Process the record
-		if err := processFn(ctx, records[0]); err != nil {
-			return fmt.Errorf("failed to process record: %w", err)
+			// Build the record from column values
+			record := make(map[string]interface{})
+			for colIdx, columnName := range columnNames {
+				if rowIdx < int64(len(columnData[colIdx])) {
+					record[columnName] = s.parquetValueToInterface(columnData[colIdx][rowIdx])
+				}
+			}
+
+			// Process the record
+			if err := processFn(ctx, record); err != nil {
+				return fmt.Errorf("failed to process record: %w", err)
+			}
+			recordCount++
 		}
-		recordCount++
 	}
 
 	logger.Infof("Processed %d records from Parquet file", recordCount)
 	return nil
 }
+
+// parquetValueToInterface converts a parquet.Value to interface{}
+func (s *S3) parquetValueToInterface(val pq.Value) interface{} {
+	if val.IsNull() {
+		return nil
+	}
+
+	// Convert based on the value's kind
+	switch val.Kind() {
+	case pq.Boolean:
+		return val.Boolean()
+	case pq.Int32:
+		return int64(val.Int32())
+	case pq.Int64:
+		return val.Int64()
+	case pq.Float:
+		return float64(val.Float())
+	case pq.Double:
+		return val.Double()
+	case pq.ByteArray:
+		return string(val.ByteArray())
+	default:
+		// For other types, convert to string
+		return val.String()
+	}
+}
+
 
 // convertValue converts a string value to the appropriate type
 func (s *S3) convertValue(value string, fieldType types.DataType) interface{} {

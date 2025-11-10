@@ -124,35 +124,25 @@ func (s *S3) inferJSONSchema(ctx context.Context, stream *types.Stream, key stri
 		defer closer.Close()
 	}
 
-	// Collect sample records
+	// Collect sample records using smart JSON format detection
 	var sampleRecords []map[string]interface{}
 	maxSamples := 100
 
-	if s.config.JSONLineDelimited {
-		// Line-delimited JSON (JSONL)
-		decoder := json.NewDecoder(reader)
-		for i := 0; i < maxSamples; i++ {
-			var record map[string]interface{}
-			if err := decoder.Decode(&record); err == io.EOF {
-				break
-			} else if err != nil {
-				logger.Warnf("Error reading JSON record %d: %v", i, err)
-				break
-			}
-			sampleRecords = append(sampleRecords, record)
-		}
-	} else {
-		// JSON array
-		var records []map[string]interface{}
-		decoder := json.NewDecoder(reader)
-		if err := decoder.Decode(&records); err != nil {
-			return nil, fmt.Errorf("failed to decode JSON array: %w", err)
-		}
-		if len(records) > maxSamples {
-			sampleRecords = records[:maxSamples]
-		} else {
-			sampleRecords = records
-		}
+	// Read all content for format detection
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read JSON file: %w", err)
+	}
+
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 {
+		return nil, fmt.Errorf("empty JSON file")
+	}
+
+	// Parse JSON based on detected format
+	sampleRecords, err = s.parseJSONContent(trimmed, key, maxSamples)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse JSON: %w", err)
 	}
 
 	if len(sampleRecords) == 0 {
@@ -320,176 +310,123 @@ func (s *S3) inferJSONFieldType(values []interface{}) types.DataType {
 	return types.String
 }
 
-// getReader returns an appropriate reader based on compression settings
+// getReader returns an appropriate reader based on file extension
+// Auto-detects compression from file extension rather than global config
 func (s *S3) getReader(body io.Reader, key string) (io.Reader, error) {
 	lowerKey := strings.ToLower(key)
 
-	if s.config.Compression == CompressionGzip || strings.HasSuffix(lowerKey, ".gz") {
+	// Check if file has gzip extension - this takes precedence over config
+	if strings.HasSuffix(lowerKey, ".gz") {
 		gzipReader, err := gzip.NewReader(body)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create gzip reader: %w", err)
 		}
+		logger.Debugf("Using gzip decompression for file: %s", key)
 		return gzipReader, nil
 	}
 
-	// TODO: Add support for zip compression if needed
+	// TODO: Add support for .zip files if needed
+	// if strings.HasSuffix(lowerKey, ".zip") { ... }
+
+	// No compression detected, return body as-is
 	return body, nil
 }
 
-// SchemaCache represents cached schema metadata
-type SchemaCache struct {
-	Fields          map[string]types.DataType `json:"fields"`
-	CursorFields    []string                  `json:"cursor_fields"`
-	CachedAt        string                    `json:"cached_at"`         // Timestamp when schema was cached
-	MaxLastModified string                    `json:"max_last_modified"` // Max LastModified of files when schema was cached
+// parseJSONContent intelligently parses JSON content based on its structure
+// Supports: JSON Array, JSONL (line-delimited), single JSON object, and nested structures
+func (s *S3) parseJSONContent(data []byte, key string, maxSamples int) ([]map[string]interface{}, error) {
+	firstChar := data[0]
+
+	switch firstChar {
+	case '[':
+		// JSON Array format: [{"key":"value"}, {"key":"value"}]
+		return s.parseJSONArray(data, key, maxSamples)
+
+	case '{':
+		// Could be either:
+		// 1. JSONL (line-delimited): {"key":"value"}\n{"key":"value"}\n
+		// 2. Single JSON object: {"key":"value"}
+		return s.parseJSONLOrObject(data, key, maxSamples)
+
+	default:
+		return nil, fmt.Errorf("invalid JSON format: expected '[' or '{', got '%c'", firstChar)
+	}
 }
 
-// shouldReinferSchema checks if schema needs to be re-inferred
-// Returns true if no cached schema exists or if files have been modified since caching
-func (s *S3) shouldReinferSchema(streamName string, files []FileObject) bool {
-	// No state available
-	if s.state == nil {
-		return true
+// parseJSONArray handles JSON array format: [{"key":"value"}, ...]
+func (s *S3) parseJSONArray(data []byte, key string, maxSamples int) ([]map[string]interface{}, error) {
+	logger.Debugf("Parsing JSON array format for file: %s", key)
+
+	var records []map[string]interface{}
+	if err := json.Unmarshal(data, &records); err != nil {
+		return nil, fmt.Errorf("failed to decode JSON array: %w", err)
 	}
 
-	// Get cached schema from state
-	cacheKey := fmt.Sprintf("schema_cache_%s", streamName)
-	tempStream := types.NewStream(streamName, "s3", &s.config.BucketName)
-	cachedData := s.state.GetCursor(&types.ConfiguredStream{
-		Stream: tempStream,
-	}, cacheKey)
+	logger.Infof("Parsed JSON array with %d records from file: %s", len(records), key)
 
-	if cachedData == nil {
-		logger.Debugf("No cached schema found for stream %s, will infer", streamName)
-		return true
+	if len(records) > maxSamples {
+		return records[:maxSamples], nil
+	}
+	return records, nil
+}
+
+// parseJSONLOrObject handles:
+// 1. JSONL format: {"key":"value"}\n{"key":"value"}\n...
+// 2. Single object: {"key":"value"}
+// 3. Newline-delimited with extra whitespace
+func (s *S3) parseJSONLOrObject(data []byte, key string, maxSamples int) ([]map[string]interface{}, error) {
+	// Try parsing as JSONL (line-delimited) first
+	records, isJSONL, err := s.tryParseJSONL(data, maxSamples)
+	if err == nil && isJSONL {
+		logger.Debugf("Parsed JSONL (line-delimited) format for file: %s", key)
+		logger.Infof("Parsed %d records from JSONL file: %s", len(records), key)
+		return records, nil
 	}
 
-	// Parse cached schema
-	cachedJSON, ok := cachedData.(string)
-	if !ok {
-		logger.Warnf("Invalid cached schema format for stream %s, will re-infer", streamName)
-		return true
-	}
-
-	var cache SchemaCache
-	if err := json.Unmarshal([]byte(cachedJSON), &cache); err != nil {
-		logger.Warnf("Failed to unmarshal cached schema for stream %s: %v, will re-infer", streamName, err)
-		return true
-	}
-
-	// Find max LastModified from current files
-	var maxLastModified string
-	for _, file := range files {
-		if file.LastModified > maxLastModified {
-			maxLastModified = file.LastModified
+	// If not JSONL, try parsing as a single JSON object
+	var singleRecord map[string]interface{}
+	if err := json.Unmarshal(data, &singleRecord); err != nil {
+		// If both failed, return a more helpful error
+		if isJSONL {
+			return nil, fmt.Errorf("failed to parse as JSONL: %w", err)
 		}
+		return nil, fmt.Errorf("failed to parse as single JSON object or JSONL: %w", err)
 	}
 
-	// Compare with cached max LastModified
-	if maxLastModified > cache.MaxLastModified {
-		logger.Infof("Files modified since schema cache for stream %s (cached: %s, current: %s), will re-infer",
-			streamName, cache.MaxLastModified, maxLastModified)
-		return true
-	}
-
-	logger.Debugf("Using cached schema for stream %s (cached at: %s)", streamName, cache.CachedAt)
-	return false
+	logger.Debugf("Parsed single JSON object for file: %s", key)
+	return []map[string]interface{}{singleRecord}, nil
 }
 
-// loadSchemaFromState loads cached schema from state and applies it to the stream
-func (s *S3) loadSchemaFromState(stream *types.Stream, streamName string) (*types.Stream, error) {
-	cacheKey := fmt.Sprintf("schema_cache_%s", streamName)
-	tempStream := types.NewStream(streamName, "s3", &s.config.BucketName)
-	cachedData := s.state.GetCursor(&types.ConfiguredStream{
-		Stream: tempStream,
-	}, cacheKey)
+// tryParseJSONL attempts to parse data as line-delimited JSON
+// Returns (records, isJSONL, error)
+// isJSONL indicates if the data appears to be JSONL format (multiple lines with objects)
+func (s *S3) tryParseJSONL(data []byte, maxSamples int) ([]map[string]interface{}, bool, error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	records := []map[string]interface{}{}
 
-	if cachedData == nil {
-		return nil, fmt.Errorf("no cached schema found for stream %s", streamName)
-	}
-
-	cachedJSON, ok := cachedData.(string)
-	if !ok {
-		return nil, fmt.Errorf("invalid cached schema format for stream %s", streamName)
-	}
-
-	var cache SchemaCache
-	if err := json.Unmarshal([]byte(cachedJSON), &cache); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal cached schema: %w", err)
-	}
-
-	// Apply cached fields to stream
-	for fieldName, dataType := range cache.Fields {
-		stream.UpsertField(fieldName, dataType, true) // Allow nulls by default
-	}
-
-	// Apply cursor fields
-	for _, cursorField := range cache.CursorFields {
-		stream.WithCursorField(cursorField)
-	}
-
-	logger.Infof("Loaded cached schema for stream %s with %d fields", streamName, len(cache.Fields))
-	return stream, nil
-}
-
-// cacheSchema stores the stream schema in state for future use
-func (s *S3) cacheSchema(stream *types.Stream, streamName string, files []FileObject) error {
-	if s.state == nil {
-		return nil // No state to cache to
-	}
-
-	// Find max LastModified from files
-	var maxLastModified string
-	for _, file := range files {
-		if file.LastModified > maxLastModified {
-			maxLastModified = file.LastModified
+	for i := 0; i < maxSamples; i++ {
+		var record map[string]interface{}
+		err := decoder.Decode(&record)
+		
+		if err == io.EOF {
+			break
 		}
-	}
-
-	// Build schema cache
-	cache := SchemaCache{
-		Fields:          make(map[string]types.DataType),
-		CursorFields:    []string{},
-		CachedAt:        maxLastModified, // Use max LastModified as cache timestamp
-		MaxLastModified: maxLastModified,
-	}
-
-	// Extract fields from stream schema
-	if stream.Schema != nil {
-		stream.Schema.Properties.Range(func(key, value interface{}) bool {
-			fieldName, ok := key.(string)
-			if !ok {
-				return true
+		
+		if err != nil {
+			// If we got at least one record, it might be JSONL with invalid trailing data
+			if len(records) > 0 {
+				logger.Warnf("JSONL parsing stopped at record %d due to error: %v", i, err)
+				return records, true, nil
 			}
-			prop, ok := value.(*types.Property)
-			if !ok {
-				return true
-			}
-			cache.Fields[fieldName] = prop.DataType()
-			return true
-		})
-	}
-
-	// Extract cursor fields
-	if stream.AvailableCursorFields != nil {
-		for _, cursorField := range stream.AvailableCursorFields.Array() {
-			cache.CursorFields = append(cache.CursorFields, cursorField)
+			// First record failed, not JSONL
+			return nil, false, err
 		}
+
+		records = append(records, record)
 	}
 
-	// Serialize to JSON
-	cacheJSON, err := json.Marshal(cache)
-	if err != nil {
-		return fmt.Errorf("failed to marshal schema cache: %w", err)
-	}
-
-	// Store in state
-	cacheKey := fmt.Sprintf("schema_cache_%s", streamName)
-	tempStream := types.NewStream(streamName, "s3", &s.config.BucketName)
-	s.state.SetCursor(&types.ConfiguredStream{
-		Stream: tempStream,
-	}, cacheKey, string(cacheJSON))
-
-	logger.Infof("Cached schema for stream %s with %d fields", streamName, len(cache.Fields))
-	return nil
+	// If we parsed multiple records or there's more data after first decode, it's JSONL
+	isJSONL := len(records) > 1 || (len(records) == 1 && decoder.More())
+	
+	return records, isJSONL, nil
 }
