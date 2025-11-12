@@ -40,6 +40,7 @@ const (
 	MySQL    DriverType = "mysql"
 	Oracle   DriverType = "oracle"
 	S3       DriverType = "s3"
+	Kafka    DriverType = "kafka"
 )
 
 var RelationalDrivers = []DriverType{Postgres, MySQL, Oracle}
