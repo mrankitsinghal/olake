@@ -336,3 +336,20 @@ func (s *S3) CloseConnection() {
 	logger.Info("Closing S3 connection")
 	// S3 client doesn't require explicit cleanup
 }
+
+// getFileSize retrieves the file size from discovered files
+// Returns 0 if file not found (fallback to non-streaming mode)
+func (s *S3) getFileSize(streamName, fileKey string) int64 {
+	files, exists := s.discoveredFiles[streamName]
+	if !exists {
+		return 0
+	}
+
+	for _, file := range files {
+		if file.FileKey == fileKey {
+			return file.Size
+		}
+	}
+
+	return 0
+}

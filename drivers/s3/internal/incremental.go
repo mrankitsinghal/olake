@@ -87,7 +87,11 @@ func (s *S3) syncAllFiles(ctx context.Context, stream types.StreamInterface, fil
 	for i, file := range files {
 		logger.Infof("Processing file %d/%d: %s", i+1, len(files), file.FileKey)
 
-		chunk := types.Chunk{Min: file.FileKey, Max: nil}
+		// Pass file metadata (size) in chunk for range requests
+		chunk := types.Chunk{
+			Min: file.FileKey,  // File key
+			Max: file.Size,     // File size for range requests
+		}
 		if err := s.ChunkIterator(ctx, stream, chunk, cb); err != nil {
 			return fmt.Errorf("failed to process file %s: %w", file.FileKey, err)
 		}

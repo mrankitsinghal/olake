@@ -60,6 +60,12 @@ type Config struct {
 	StreamGroupingEnabled bool   `json:"stream_grouping_enabled"` // Default: true - groups files by folder
 	StreamGroupingLevel   int    `json:"stream_grouping_level"`   // Folder depth for grouping (default: 1)
 	StreamPattern         string `json:"stream_pattern"`          // Regex pattern for custom grouping (Phase 2)
+
+	// Parquet streaming configuration (uses S3 range requests to avoid loading full file in memory)
+	ParquetStreamingEnabled     bool `json:"parquet_streaming_enabled"`       // Default: true - use S3 range requests
+	ParquetRowGroupChunkSizeMB  int  `json:"parquet_row_group_chunk_size_mb"` // Default: 64MB per row group
+	ParquetFooterReadSizeKB     int  `json:"parquet_footer_read_size_kb"`     // Default: 512KB for footer
+	MaxParquetRowGroupsInMemory int  `json:"max_parquet_row_groups_in_memory"` // Default: 1 - process one at a time
 }
 
 // Validate validates the S3 configuration
@@ -162,6 +168,27 @@ func (c *Config) Validate() error {
 	// Validate and set default grouping level
 	if c.StreamGroupingLevel <= 0 {
 		c.StreamGroupingLevel = 1
+	}
+
+	// Parquet streaming defaults (Phase 1 - Comment 2 implementation)
+	// Default to enabled for memory-efficient processing
+	if !c.ParquetStreamingEnabled {
+		c.ParquetStreamingEnabled = true
+	}
+
+	// Default row group chunk size: 64MB (typical Parquet row group size)
+	if c.ParquetRowGroupChunkSizeMB <= 0 {
+		c.ParquetRowGroupChunkSizeMB = 64
+	}
+
+	// Default footer read size: 512KB (enough for most Parquet footers)
+	if c.ParquetFooterReadSizeKB <= 0 {
+		c.ParquetFooterReadSizeKB = 512
+	}
+
+	// Default to processing one row group at a time (minimize memory)
+	if c.MaxParquetRowGroupsInMemory <= 0 {
+		c.MaxParquetRowGroupsInMemory = 1
 	}
 
 	return nil

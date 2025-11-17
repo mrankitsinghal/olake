@@ -172,42 +172,149 @@ func (s *S3) inferJSONSchema(ctx context.Context, stream *types.Stream, key stri
 func (s *S3) inferParquetSchema(ctx context.Context, stream *types.Stream, key string) (*types.Stream, error) {
 	logger.Infof("Inferring Parquet schema for file: %s", key)
 
-	// Get the object from S3
-	result, err := s.client.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(s.config.BucketName),
-		Key:    aws.String(key),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to get object from S3: %w", err)
-	}
-	defer result.Body.Close()
+	// Get file size from discovered files
+	fileSize := s.getFileSize(stream.Name, key)
 
-	// Read the parquet file content into memory
-	data, err := io.ReadAll(result.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read parquet file: %w", err)
-	}
+	var pqFile *pq.File
+	var err error
 
-	// Open parquet file to read schema
-	pqFile, err := pq.OpenFile(bytes.NewReader(data), int64(len(data)))
-	if err != nil {
-		return nil, fmt.Errorf("failed to open parquet file: %w", err)
+	// Use range reader if streaming is enabled and we have file size
+	if s.config.ParquetStreamingEnabled && fileSize > 0 {
+		logger.Debugf("Using S3 range requests for schema inference")
+		rangeReader := NewS3RangeReader(ctx, s.client, s.config.BucketName, key, fileSize)
+		pqFile, err = pq.OpenFile(rangeReader, fileSize)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open parquet file with range reader: %w", err)
+		}
+	} else {
+		// Fallback: read entire file into memory
+		logger.Debugf("Using full file read for schema inference (streaming disabled)")
+		result, getErr := s.client.GetObject(ctx, &s3.GetObjectInput{
+			Bucket: aws.String(s.config.BucketName),
+			Key:    aws.String(key),
+		})
+		if getErr != nil {
+			return nil, fmt.Errorf("failed to get object from S3: %w", getErr)
+		}
+		defer result.Body.Close()
+
+		data, readErr := io.ReadAll(result.Body)
+		if readErr != nil {
+			return nil, fmt.Errorf("failed to read parquet file: %w", readErr)
+		}
+
+		pqFile, err = pq.OpenFile(bytes.NewReader(data), int64(len(data)))
+		if err != nil {
+			return nil, fmt.Errorf("failed to open parquet file: %w", err)
+		}
 	}
 
 	// Get the schema from parquet file
 	schema := pqFile.Schema()
 
-	// Convert parquet schema to Olake schema
+	// Convert parquet schema to Olake schema with proper type mapping
 	for _, field := range schema.Fields() {
-		// Use string type for all fields for simplicity
-		// The parquet reader will handle the actual type conversions
-		stream.UpsertField(field.Name(), types.String, true)
-		stream.WithCursorField(field.Name())
+		olakeType := s.mapParquetTypeToOlake(field.Type())
+		nullable := field.Optional()
+		stream.UpsertField(field.Name(), olakeType, nullable)
 	}
 
-	logger.Infof("Inferred %d columns from Parquet file", len(schema.Fields()))
+	logger.Infof("Inferred %d columns from Parquet file with proper types", len(schema.Fields()))
 
 	return stream, nil
+}
+
+// mapParquetTypeToOlake maps Parquet physical types and logical type annotations to Olake data types
+func (s *S3) mapParquetTypeToOlake(pqType pq.Type) types.DataType {
+	// First, check for logical type annotations which provide semantic meaning
+	if logicalType := pqType.LogicalType(); logicalType != nil {
+		// Integer logical types (INT_8, INT_16, INT_32, INT_64)
+		if logicalType.Integer != nil {
+			switch logicalType.Integer.BitWidth {
+			case 8, 16, 32:
+				return types.Int32
+			case 64:
+				return types.Int64
+			default:
+				logger.Warnf("Unexpected integer bit width %d, defaulting to Int32", logicalType.Integer.BitWidth)
+				return types.Int32
+			}
+		}
+
+		// Timestamp with precision
+		if logicalType.Timestamp != nil {
+			if logicalType.Timestamp.Unit.Nanos != nil {
+				return types.TimestampNano
+			} else if logicalType.Timestamp.Unit.Micros != nil {
+				return types.TimestampMicro
+			} else if logicalType.Timestamp.Unit.Millis != nil {
+				return types.TimestampMilli
+			}
+			return types.Timestamp
+		}
+
+		// Time with precision
+		if logicalType.Time != nil {
+			if logicalType.Time.Unit.Nanos != nil {
+				return types.TimestampNano
+			} else if logicalType.Time.Unit.Micros != nil {
+				return types.TimestampMicro
+			} else if logicalType.Time.Unit.Millis != nil {
+				return types.TimestampMilli
+			}
+			return types.String
+		}
+
+		// Date
+		if logicalType.Date != nil {
+			return types.Timestamp
+		}
+
+		// Decimal (stored as INT32/INT64/BYTE_ARRAY)
+		if logicalType.Decimal != nil {
+			return types.Float64
+		}
+
+		// String-based types: UTF8, JSON, UUID, Enum, BSON
+		if logicalType.UTF8 != nil || logicalType.Json != nil || logicalType.UUID != nil ||
+			logicalType.Enum != nil || logicalType.Bson != nil {
+			return types.String
+		}
+
+		// List (arrays)
+		if logicalType.List != nil {
+			return types.Array
+		}
+
+		// Map (objects)
+		if logicalType.Map != nil {
+			return types.Object
+		}
+	}
+
+	// Physical type mapping (no logical type annotation)
+	switch pqType.Kind() {
+	case pq.Boolean:
+		return types.Bool
+	case pq.Int32:
+		return types.Int32
+	case pq.Int64:
+		return types.Int64
+	case pq.Int96:
+		// Int96 is typically used for timestamps in legacy Parquet files
+		return types.Timestamp
+	case pq.Float:
+		return types.Float32
+	case pq.Double:
+		return types.Float64
+	case pq.ByteArray, pq.FixedLenByteArray:
+		// Byte arrays without logical type annotation default to string
+		return types.String
+	default:
+		// Unknown types default to string for safety
+		logger.Warnf("Unknown Parquet type %v, defaulting to string", pqType.Kind())
+		return types.String
+	}
 }
 
 // inferColumnType infers the data type of a CSV column from sample values

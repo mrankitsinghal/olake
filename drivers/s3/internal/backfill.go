@@ -32,27 +32,36 @@ func (s *S3) GetOrSplitChunks(ctx context.Context, pool *destination.WriterPool,
 
 	chunks := types.NewSet[types.Chunk]()
 
-	// Estimate total row count across all files in the stream
+	// Calculate total file size across all files in the stream
 	var totalSize int64
+	totalFiles := len(files)
 	for _, file := range files {
 		totalSize += file.Size
 	}
 
-	// Assuming average row size of 100 bytes for estimation
-	estimatedRows := totalSize / 100
-	if estimatedRows < 1 {
-		estimatedRows = 1
+	// Convert to human-readable format
+	sizeInMB := float64(totalSize) / (1024 * 1024)
+	var sizeDisplay string
+	if sizeInMB < 1 {
+		sizeDisplay = fmt.Sprintf("%.2f KB", float64(totalSize)/1024)
+	} else if sizeInMB < 1024 {
+		sizeDisplay = fmt.Sprintf("%.2f MB", sizeInMB)
+	} else {
+		sizeDisplay = fmt.Sprintf("%.2f GB", sizeInMB/1024)
 	}
-	pool.AddRecordsToSyncStats(estimatedRows)
 
-	logger.Infof("Creating %d chunks for stream %s (total size: %d bytes, estimated rows: %d)",
-		len(files), streamName, totalSize, estimatedRows)
+	// Use file count as a proxy for sync stats instead of estimated rows
+	pool.AddRecordsToSyncStats(int64(totalFiles))
+
+	logger.Infof("Creating %d chunks for stream %s (total files: %d, total size: %s)",
+		len(files), streamName, totalFiles, sizeDisplay)
 
 	// Create one chunk per file (Phase 1 - no file splitting)
+	// Store file metadata in chunk for range requests
 	for _, file := range files {
 		chunks.Insert(types.Chunk{
-			Min: file.FileKey, // File key as chunk identifier
-			Max: nil,          // Single chunk per file
+			Min: file.FileKey,  // File key as chunk identifier
+			Max: file.Size,     // Store file size in Max for range requests
 		})
 	}
 
@@ -66,9 +75,22 @@ func (s *S3) ChunkIterator(ctx context.Context, stream types.StreamInterface, ch
 		return fmt.Errorf("invalid chunk Min type: expected string, got %T", chunk.Min)
 	}
 
-	logger.Infof("Processing file: %s", key)
+	// Extract file size from chunk metadata (stored in Max field)
+	var fileSize int64
+	if chunk.Max != nil {
+		if size, ok := chunk.Max.(int64); ok {
+			fileSize = size
+		}
+	}
 
-	// Get the object from S3
+	logger.Infof("Processing file: %s (size: %d bytes)", key, fileSize)
+
+	// For Parquet with streaming enabled, use range requests
+	if s.config.FileFormat == FormatParquet && s.config.ParquetStreamingEnabled && fileSize > 0 {
+		return s.processParquetFileStreaming(ctx, key, fileSize, processFn)
+	}
+
+	// For other formats or fallback, use standard streaming from S3
 	result, err := s.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.config.BucketName),
 		Key:    aws.String(key),
@@ -99,6 +121,7 @@ func (s *S3) ChunkIterator(ctx context.Context, stream types.StreamInterface, ch
 	case FormatJSON:
 		return s.processJSONFile(ctx, reader, processFn)
 	case FormatParquet:
+		// Fallback to in-memory processing if streaming disabled
 		return s.processParquetFile(ctx, reader, processFn)
 	default:
 		return fmt.Errorf("unsupported file format: %s", s.config.FileFormat)
@@ -239,14 +262,20 @@ func (s *S3) processJSONFile(ctx context.Context, reader io.Reader, processFn ab
 			recordCount++
 		}
 	} else {
-		// JSON array
-		var records []map[string]interface{}
+		// JSON array - stream elements one at a time to avoid loading entire array in memory
 		decoder := json.NewDecoder(reader)
-		if err := decoder.Decode(&records); err != nil {
-			return fmt.Errorf("failed to decode JSON array: %w", err)
+
+		// Read opening bracket '['
+		t, err := decoder.Token()
+		if err != nil {
+			return fmt.Errorf("failed to read opening bracket: %w", err)
+		}
+		if delim, ok := t.(json.Delim); !ok || delim != '[' {
+			return fmt.Errorf("expected JSON array, got: %v", t)
 		}
 
-		for _, record := range records {
+		// Stream array elements one by one
+		for decoder.More() {
 			// Check context cancellation
 			select {
 			case <-ctx.Done():
@@ -254,10 +283,24 @@ func (s *S3) processJSONFile(ctx context.Context, reader io.Reader, processFn ab
 			default:
 			}
 
+			var record map[string]interface{}
+			if err := decoder.Decode(&record); err != nil {
+				return fmt.Errorf("failed to decode JSON record: %w", err)
+			}
+
 			if err := processFn(ctx, record); err != nil {
 				return fmt.Errorf("failed to process record: %w", err)
 			}
 			recordCount++
+		}
+
+		// Read closing bracket ']'
+		t, err = decoder.Token()
+		if err != nil {
+			return fmt.Errorf("failed to read closing bracket: %w", err)
+		}
+		if delim, ok := t.(json.Delim); !ok || delim != ']' {
+			return fmt.Errorf("expected closing bracket, got: %v", t)
 		}
 	}
 
@@ -349,6 +392,105 @@ func (s *S3) processParquetFile(ctx context.Context, reader io.Reader, processFn
 	}
 
 	logger.Infof("Processed %d records from Parquet file", recordCount)
+	return nil
+}
+
+// processParquetFileStreaming uses S3 range requests to stream Parquet files without loading entire file in memory
+// This is the memory-efficient implementation addressing Comment 2 from PR review
+func (s *S3) processParquetFileStreaming(ctx context.Context, key string, fileSize int64, processFn abstract.BackfillMsgFn) error {
+	logger.Infof("Processing Parquet file with streaming (S3 range requests): %s (size: %.2f MB)", 
+		key, float64(fileSize)/(1024*1024))
+
+	// Create S3 range reader for streaming access
+	rangeReader := NewS3RangeReader(ctx, s.client, s.config.BucketName, key, fileSize)
+
+	// Open Parquet file using range reader (parquet-go will make range requests as needed)
+	pqFile, err := pq.OpenFile(rangeReader, fileSize)
+	if err != nil {
+		return fmt.Errorf("failed to open parquet file with range reader: %w", err)
+	}
+
+	// Get schema to know column names
+	schema := pqFile.Schema()
+	fields := schema.Fields()
+	columnNames := make([]string, len(fields))
+	for i, field := range fields {
+		columnNames[i] = field.Name()
+	}
+
+	recordCount := 0
+	totalRowGroups := len(pqFile.RowGroups())
+
+	logger.Infof("Parquet file has %d row groups, processing one at a time", totalRowGroups)
+
+	// Process each row group sequentially (only one in memory at a time)
+	for rgIdx, rowGroup := range pqFile.RowGroups() {
+		logger.Debugf("Processing row group %d/%d (approx %d rows)", 
+			rgIdx+1, totalRowGroups, rowGroup.NumRows())
+
+		numRows := rowGroup.NumRows()
+
+		// Read all columns into memory for THIS row group only
+		// This limits memory to: one row group size (typically 64-128MB)
+		columnData := make([][]pq.Value, len(fields))
+		for colIdx, columnChunk := range rowGroup.ColumnChunks() {
+			// Read all values from this column (via range requests)
+			pages := columnChunk.Pages()
+			columnValues := make([]pq.Value, 0, numRows)
+
+			for {
+				page, err := pages.ReadPage()
+				if err == io.EOF {
+					break
+				}
+				if err != nil {
+					return fmt.Errorf("failed to read page in row group %d: %w", rgIdx, err)
+				}
+
+				// Read values from the page
+				pageValues := make([]pq.Value, page.NumValues())
+				_, err = page.Values().ReadValues(pageValues)
+				if err != nil && err != io.EOF {
+					return fmt.Errorf("failed to read page values in row group %d: %w", rgIdx, err)
+				}
+
+				columnValues = append(columnValues, pageValues...)
+			}
+			pages.Close()
+
+			columnData[colIdx] = columnValues
+		}
+
+		// Process rows from this row group
+		for rowIdx := int64(0); rowIdx < numRows; rowIdx++ {
+			// Check context cancellation
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+
+			// Build the record from column values
+			record := make(map[string]interface{})
+			for colIdx, columnName := range columnNames {
+				if rowIdx < int64(len(columnData[colIdx])) {
+					record[columnName] = s.parquetValueToInterface(columnData[colIdx][rowIdx])
+				}
+			}
+
+			// Process the record
+			if err := processFn(ctx, record); err != nil {
+				return fmt.Errorf("failed to process record in row group %d: %w", rgIdx, err)
+			}
+			recordCount++
+		}
+
+		// Row group data will be garbage collected here before processing next row group
+		logger.Debugf("Completed row group %d/%d (%d records)", rgIdx+1, totalRowGroups, numRows)
+	}
+
+	logger.Infof("Completed streaming Parquet file: %s (%d records from %d row groups)", 
+		key, recordCount, totalRowGroups)
 	return nil
 }
 
