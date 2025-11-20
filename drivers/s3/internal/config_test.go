@@ -48,14 +48,35 @@ func TestConfigValidate(t *testing.T) {
 			errMsg:  "region is required when not using custom endpoint",
 		},
 		{
-			name: "missing credentials",
+			name: "missing credentials - should pass (uses default credential chain)",
 			config: Config{
 				BucketName: "test-bucket",
 				Region:     "us-east-1",
 				FileFormat: FormatCSV,
 			},
+			wantErr: false, // Changed: credentials are now optional
+		},
+		{
+			name: "partial credentials - only access key",
+			config: Config{
+				BucketName:  "test-bucket",
+				Region:      "us-east-1",
+				AccessKeyID: "test-access-key",
+				FileFormat:  FormatCSV,
+			},
 			wantErr: true,
-			errMsg:  "access_key_id and secret_access_key are required",
+			errMsg:  "access_key_id and secret_access_key must be provided together",
+		},
+		{
+			name: "partial credentials - only secret key",
+			config: Config{
+				BucketName:      "test-bucket",
+				Region:          "us-east-1",
+				SecretAccessKey: "test-secret-key",
+				FileFormat:      FormatCSV,
+			},
+			wantErr: true,
+			errMsg:  "access_key_id and secret_access_key must be provided together",
 		},
 		{
 			name: "missing file format",

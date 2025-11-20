@@ -31,6 +31,7 @@ func (s *S3) FetchMaxCursorValues(ctx context.Context, stream types.StreamInterf
 }
 
 // StreamIncrementalChanges processes only new or modified files since last sync
+// Uses parallel chunk processing for better performance
 func (s *S3) StreamIncrementalChanges(ctx context.Context, stream types.StreamInterface, cb abstract.BackfillMsgFn) error {
 	streamName := stream.Name()
 	files, exists := s.discoveredFiles[streamName]
@@ -40,11 +41,31 @@ func (s *S3) StreamIncrementalChanges(ctx context.Context, stream types.StreamIn
 
 	logger.Infof("Checking for incremental changes for stream: %s (%d files)", streamName, len(files))
 
+	// Filter files based on LastModified cursor
+	filesToSync, err := s.filterFilesForIncremental(stream, files)
+	if err != nil {
+		return fmt.Errorf("failed to filter files: %w", err)
+	}
+
+	if len(filesToSync) == 0 {
+		logger.Infof("No new or modified files for stream %s", streamName)
+		return nil
+	}
+
+	logger.Infof("Found %d files to sync for stream %s (out of %d total)", 
+		len(filesToSync), streamName, len(files))
+
+	// Process filtered files using parallel chunk processing
+	return s.processFilesInParallel(ctx, stream, filesToSync, cb)
+}
+
+// filterFilesForIncremental filters files based on LastModified cursor from state
+func (s *S3) filterFilesForIncremental(stream types.StreamInterface, files []FileObject) ([]FileObject, error) {
 	// Get configured stream to access state
 	configuredStream, ok := stream.(*types.ConfiguredStream)
 	if !ok {
 		logger.Warnf("Failed to cast to ConfiguredStream, syncing all files")
-		return s.syncAllFiles(ctx, stream, files, cb)
+		return files, nil
 	}
 
 	// Get last synced timestamp from state (primary cursor)
@@ -53,15 +74,15 @@ func (s *S3) StreamIncrementalChanges(ctx context.Context, stream types.StreamIn
 
 	if lastSyncedTimestamp == nil {
 		// First sync - process all files
-		logger.Infof("No previous state for stream %s, syncing all %d files", streamName, len(files))
-		return s.syncAllFiles(ctx, stream, files, cb)
+		logger.Infof("No previous state for stream %s, syncing all %d files", stream.Name(), len(files))
+		return files, nil
 	}
 
 	// Parse last synced timestamp
 	lastSynced, ok := lastSyncedTimestamp.(string)
 	if !ok {
-		logger.Warnf("Invalid cursor format in state for stream %s, syncing all files", streamName)
-		return s.syncAllFiles(ctx, stream, files, cb)
+		logger.Warnf("Invalid cursor format in state for stream %s, syncing all files", stream.Name())
+		return files, nil
 	}
 
 	// Filter files modified after last sync
@@ -73,29 +94,56 @@ func (s *S3) StreamIncrementalChanges(ctx context.Context, stream types.StreamIn
 		}
 	}
 
-	if len(filesToSync) == 0 {
-		logger.Infof("No new or modified files for stream %s (last synced: %s)", streamName, lastSynced)
-		return nil
-	}
-
-	logger.Infof("Syncing %d modified files for stream %s (out of %d total)", len(filesToSync), streamName, len(files))
-	return s.syncAllFiles(ctx, stream, filesToSync, cb)
+	return filesToSync, nil
 }
 
-// syncAllFiles processes a list of files sequentially
-func (s *S3) syncAllFiles(ctx context.Context, stream types.StreamInterface, files []FileObject, cb abstract.BackfillMsgFn) error {
-	for i, file := range files {
-		logger.Infof("Processing file %d/%d: %s", i+1, len(files), file.FileKey)
+// processFilesInParallel processes files using parallel goroutines with worker pool pattern
+func (s *S3) processFilesInParallel(ctx context.Context, stream types.StreamInterface, files []FileObject, cb abstract.BackfillMsgFn) error {
+	logger.Infof("Processing %d files in parallel for stream %s", len(files), stream.Name())
 
-		// Pass file metadata (size) in chunk for range requests
-		chunk := types.Chunk{
-			Min: file.FileKey,  // File key
-			Max: file.Size,     // File size for range requests
-		}
-		if err := s.ChunkIterator(ctx, stream, chunk, cb); err != nil {
-			return fmt.Errorf("failed to process file %s: %w", file.FileKey, err)
+	// Create error channel to collect errors from workers
+	errChan := make(chan error, len(files))
+	
+	// Use semaphore pattern to limit concurrent file processing
+	// This prevents overwhelming S3 API or consuming too much memory
+	maxConcurrency := s.config.MaxThreads
+	if maxConcurrency <= 0 {
+		maxConcurrency = 4 // Default concurrency
+	}
+	semaphore := make(chan struct{}, maxConcurrency)
+
+	// Process files concurrently
+	for i, file := range files {
+		// Acquire semaphore
+		semaphore <- struct{}{}
+		
+		go func(fileIndex int, fileObj FileObject) {
+			defer func() { <-semaphore }() // Release semaphore
+			
+			logger.Infof("Processing file %d/%d: %s", fileIndex+1, len(files), fileObj.FileKey)
+			
+			chunk := types.Chunk{
+				Min: fileObj.FileKey, // File key as chunk identifier
+				Max: fileObj.Size,    // File size for range requests
+			}
+			
+			if err := s.ChunkIterator(ctx, stream, chunk, cb); err != nil {
+				errChan <- fmt.Errorf("failed to process file %s: %w", fileObj.FileKey, err)
+				return
+			}
+			
+			logger.Debugf("Successfully processed file: %s", fileObj.FileKey)
+			errChan <- nil
+		}(i, file)
+	}
+
+	// Wait for all goroutines to complete and collect errors
+	var firstErr error
+	for i := 0; i < len(files); i++ {
+		if err := <-errChan; err != nil && firstErr == nil {
+			firstErr = err
 		}
 	}
 
-	return nil
+	return firstErr
 }

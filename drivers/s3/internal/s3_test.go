@@ -116,14 +116,37 @@ func TestConfigValidation(t *testing.T) {
 			errorMsg:    "bucket_name is required",
 		},
 		{
-			name: "missing credentials",
+			name: "missing credentials - should pass (uses default credential chain)",
 			config: Config{
 				BucketName: "test-bucket",
 				Region:     "us-east-1",
 				FileFormat: FormatCSV,
 			},
+			expectError: false, // Changed: now credentials are optional
+		},
+		{
+			name: "partial credentials - access key only",
+			config: Config{
+				BucketName:  "test-bucket",
+				Region:      "us-east-1",
+				AccessKeyID: "test-key",
+				// Missing SecretAccessKey
+				FileFormat: FormatCSV,
+			},
 			expectError: true,
-			errorMsg:    "access_key_id and secret_access_key are required",
+			errorMsg:    "access_key_id and secret_access_key must be provided together",
+		},
+		{
+			name: "partial credentials - secret key only",
+			config: Config{
+				BucketName:      "test-bucket",
+				Region:          "us-east-1",
+				SecretAccessKey: "test-secret",
+				// Missing AccessKeyID
+				FileFormat: FormatCSV,
+			},
+			expectError: true,
+			errorMsg:    "access_key_id and secret_access_key must be provided together",
 		},
 		{
 			name: "invalid file format",

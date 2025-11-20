@@ -20,7 +20,8 @@ import (
 )
 
 // GetOrSplitChunks returns chunks for parallel processing of files
-// For S3, we treat each file as a single chunk (no splitting within files for now)
+// Groups multiple small files into ~2GB chunks to reduce state size
+// Large files (>2GB) are kept as individual chunks
 func (s *S3) GetOrSplitChunks(ctx context.Context, pool *destination.WriterPool, stream types.StreamInterface) (*types.Set[types.Chunk], error) {
 	streamName := stream.Name()
 	files, exists := s.discoveredFiles[streamName]
@@ -29,8 +30,6 @@ func (s *S3) GetOrSplitChunks(ctx context.Context, pool *destination.WriterPool,
 		logger.Warnf("No files found for stream %s, returning empty chunk set", streamName)
 		return types.NewSet[types.Chunk](), nil
 	}
-
-	chunks := types.NewSet[types.Chunk]()
 
 	// Calculate total file size across all files in the stream
 	var totalSize int64
@@ -53,37 +52,131 @@ func (s *S3) GetOrSplitChunks(ctx context.Context, pool *destination.WriterPool,
 	// Use file count as a proxy for sync stats instead of estimated rows
 	pool.AddRecordsToSyncStats(int64(totalFiles))
 
-	logger.Infof("Creating %d chunks for stream %s (total files: %d, total size: %s)",
-		len(files), streamName, totalFiles, sizeDisplay)
+	// Group files into chunks based on size to optimize state storage and parallel processing
+	chunks := s.groupFilesIntoChunks(files)
 
-	// Create one chunk per file (Phase 1 - no file splitting)
-	// Store file metadata in chunk for range requests
-	for _, file := range files {
-		chunks.Insert(types.Chunk{
-			Min: file.FileKey,  // File key as chunk identifier
-			Max: file.Size,     // Store file size in Max for range requests
-		})
-	}
+	logger.Infof("Creating %d chunks for stream %s (total files: %d, total size: %s)",
+		chunks.Len(), streamName, totalFiles, sizeDisplay)
 
 	return chunks, nil
 }
 
-// ChunkIterator reads and processes records from an S3 file
-func (s *S3) ChunkIterator(ctx context.Context, stream types.StreamInterface, chunk types.Chunk, processFn abstract.BackfillMsgFn) error {
-	key, ok := chunk.Min.(string)
-	if !ok {
-		return fmt.Errorf("invalid chunk Min type: expected string, got %T", chunk.Min)
-	}
+// groupFilesIntoChunks groups multiple small files into ~2GB chunks while keeping large files separate
+// This reduces state size (fewer chunks to track) while maintaining parallel processing efficiency
+func (s *S3) groupFilesIntoChunks(files []FileObject) *types.Set[types.Chunk] {
+	const targetChunkSize int64 = 2 * 1024 * 1024 * 1024 // 2GB target chunk size
+	const largeFileThreshold int64 = targetChunkSize      // Files > 2GB get their own chunk
 
-	// Extract file size from chunk metadata (stored in Max field)
-	var fileSize int64
-	if chunk.Max != nil {
-		if size, ok := chunk.Max.(int64); ok {
-			fileSize = size
+	chunks := types.NewSet[types.Chunk]()
+	var currentChunkFiles []string
+	var currentChunkSize int64
+
+	for _, file := range files {
+		// Large files get their own chunk (single file per chunk)
+		if file.Size >= largeFileThreshold {
+			// Flush any accumulated small files first
+			if len(currentChunkFiles) > 0 {
+				chunks.Insert(types.Chunk{
+					Min: currentChunkFiles,  // Array of file keys
+					Max: currentChunkSize,   // Total size of files in this chunk
+				})
+				currentChunkFiles = nil
+				currentChunkSize = 0
+			}
+
+			// Add large file as separate chunk
+			chunks.Insert(types.Chunk{
+				Min: file.FileKey,  // Single file key (string)
+				Max: file.Size,     // File size
+			})
+			logger.Debugf("Large file (%d MB) in separate chunk: %s", 
+				file.Size/(1024*1024), file.FileKey)
+			continue
 		}
+
+		// Group small files into chunks
+		if currentChunkSize+file.Size > targetChunkSize && len(currentChunkFiles) > 0 {
+			// Current chunk would exceed target size, flush it
+			chunks.Insert(types.Chunk{
+				Min: currentChunkFiles,  // Array of file keys
+				Max: currentChunkSize,   // Total size of files in this chunk
+			})
+			logger.Debugf("Created chunk with %d files (%d MB)", 
+				len(currentChunkFiles), currentChunkSize/(1024*1024))
+			currentChunkFiles = nil
+			currentChunkSize = 0
+		}
+
+		// Add file to current chunk
+		currentChunkFiles = append(currentChunkFiles, file.FileKey)
+		currentChunkSize += file.Size
 	}
 
-	logger.Infof("Processing file: %s (size: %d bytes)", key, fileSize)
+	// Flush remaining files
+	if len(currentChunkFiles) > 0 {
+		chunks.Insert(types.Chunk{
+			Min: currentChunkFiles,  // Array of file keys
+			Max: currentChunkSize,   // Total size of files in this chunk
+		})
+		logger.Debugf("Created final chunk with %d files (%d MB)", 
+			len(currentChunkFiles), currentChunkSize/(1024*1024))
+	}
+
+	return chunks
+}
+
+// ChunkIterator reads and processes records from an S3 file or multiple files
+// Handles both single file chunks (Min = string) and multi-file chunks (Min = []string)
+func (s *S3) ChunkIterator(ctx context.Context, stream types.StreamInterface, chunk types.Chunk, processFn abstract.BackfillMsgFn) error {
+	// Check if this is a multi-file chunk or single file chunk
+	switch v := chunk.Min.(type) {
+	case []string:
+		// Multi-file chunk - process each file sequentially within the chunk
+		logger.Infof("Processing chunk with %d files", len(v))
+		for i, key := range v {
+			logger.Debugf("Processing file %d/%d in chunk: %s", i+1, len(v), key)
+			fileSize := s.getFileSize(stream.Name(), key)
+			if err := s.processFile(ctx, stream, key, fileSize, processFn); err != nil {
+				return fmt.Errorf("failed to process file %s in chunk: %w", key, err)
+			}
+		}
+		return nil
+
+	case []interface{}:
+		// Handle []interface{} from state deserialization
+		logger.Infof("Processing chunk with %d files (interface array)", len(v))
+		for i, item := range v {
+			key, ok := item.(string)
+			if !ok {
+				return fmt.Errorf("invalid file key type in chunk: expected string, got %T", item)
+			}
+			logger.Debugf("Processing file %d/%d in chunk: %s", i+1, len(v), key)
+			fileSize := s.getFileSize(stream.Name(), key)
+			if err := s.processFile(ctx, stream, key, fileSize, processFn); err != nil {
+				return fmt.Errorf("failed to process file %s in chunk: %w", key, err)
+			}
+		}
+		return nil
+
+	case string:
+		// Single file chunk - process directly
+		key := v
+		var fileSize int64
+		if chunk.Max != nil {
+			if size, ok := chunk.Max.(int64); ok {
+				fileSize = size
+			}
+		}
+		logger.Infof("Processing single file: %s (size: %d bytes)", key, fileSize)
+		return s.processFile(ctx, stream, key, fileSize, processFn)
+
+	default:
+		return fmt.Errorf("invalid chunk Min type: expected string or []string, got %T", chunk.Min)
+	}
+}
+
+// processFile handles the processing of a single S3 file
+func (s *S3) processFile(ctx context.Context, stream types.StreamInterface, key string, fileSize int64, processFn abstract.BackfillMsgFn) error {
 
 	// For Parquet with streaming enabled, use range requests
 	if s.config.FileFormat == FormatParquet && s.config.ParquetStreamingEnabled && fileSize > 0 {

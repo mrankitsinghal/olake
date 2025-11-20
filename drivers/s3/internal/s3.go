@@ -57,33 +57,38 @@ func (s *S3) Setup(ctx context.Context) error {
 		logger.Infof("Using file pattern filter: %s", s.config.FilePattern)
 	}
 
-	// Configure AWS SDK with static credentials
+	// Configure AWS SDK - supports both static credentials and default credential chain
 	var cfg aws.Config
 	var err error
 
-	if s.config.Endpoint != "" {
-		// Custom endpoint (e.g., MinIO, LocalStack)
-		logger.Infof("Connecting to S3-compatible endpoint: %s", s.config.Endpoint)
-		cfg, err = config.LoadDefaultConfig(ctx,
-			config.WithRegion(s.config.Region),
-			config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
-				s.config.AccessKeyID,
-				s.config.SecretAccessKey,
-				"",
-			)),
-		)
-	} else {
-		// Standard AWS S3
-		logger.Infof("Connecting to AWS S3 in region: %s", s.config.Region)
-		cfg, err = config.LoadDefaultConfig(ctx,
-			config.WithRegion(s.config.Region),
-			config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
-				s.config.AccessKeyID,
-				s.config.SecretAccessKey,
-				"",
-			)),
-		)
+	// Build config options
+	configOpts := []func(*config.LoadOptions) error{
+		config.WithRegion(s.config.Region),
 	}
+
+	// Use static credentials if provided, otherwise fall back to default credential chain
+	// Default chain includes: IAM roles, instance profiles, environment variables, shared config
+	if s.config.AccessKeyID != "" && s.config.SecretAccessKey != "" {
+		logger.Info("Using static credentials for S3 authentication")
+		configOpts = append(configOpts, config.WithCredentialsProvider(
+			credentials.NewStaticCredentialsProvider(
+				s.config.AccessKeyID,
+				s.config.SecretAccessKey,
+				"",
+			),
+		))
+	} else {
+		logger.Info("Using default credential chain (IAM role, instance profile, env vars, or shared config)")
+	}
+
+	// Load configuration
+	if s.config.Endpoint != "" {
+		logger.Infof("Connecting to S3-compatible endpoint: %s", s.config.Endpoint)
+	} else {
+		logger.Infof("Connecting to AWS S3 in region: %s", s.config.Region)
+	}
+
+	cfg, err = config.LoadDefaultConfig(ctx, configOpts...)
 
 	if err != nil {
 		return fmt.Errorf("failed to load AWS config: %w", err)
@@ -139,9 +144,16 @@ func (s *S3) GetStreamNames(ctx context.Context) ([]string, error) {
 	// Initialize the map for grouped files
 	filesByStream := make(map[string][]FileObject)
 	var continuationToken *string
+	pageCount := 0
+	totalDiscovered := 0
 
-	// List all objects with the given prefix
+	// List all objects with the given prefix (paginated)
+	// Note: We accumulate all file metadata before processing because:
+	// 1. File metadata is small (~200 bytes per file, 1M files = ~200MB)
+	// 2. Chunking requires full file list to group files into ~2GB chunks
+	// 3. Incremental sync needs to filter across all files by LastModified
 	for {
+		pageCount++
 		input := &s3.ListObjectsV2Input{
 			Bucket:            aws.String(s.config.BucketName),
 			Prefix:            aws.String(s.config.PathPrefix),
@@ -152,6 +164,8 @@ func (s *S3) GetStreamNames(ctx context.Context) ([]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to list objects in bucket: %w", err)
 		}
+
+		logger.Debugf("Processing S3 list page %d (%d objects in this page)", pageCount, len(result.Contents))
 
 		// Filter and collect matching files
 		for _, obj := range result.Contents {
@@ -184,10 +198,12 @@ func (s *S3) GetStreamNames(ctx context.Context) ([]string, error) {
 			// Group files by stream name (folder or individual file)
 			streamName := s.extractStreamName(key)
 			filesByStream[streamName] = append(filesByStream[streamName], fileObj)
+			totalDiscovered++
 		}
 
 		// Check if there are more results
 		if !aws.ToBool(result.IsTruncated) {
+			logger.Infof("Completed S3 discovery: processed %d pages, discovered %d files", pageCount, totalDiscovered)
 			break
 		}
 		continuationToken = result.NextContinuationToken
@@ -204,7 +220,7 @@ func (s *S3) GetStreamNames(ctx context.Context) ([]string, error) {
 		totalFiles += len(files)
 	}
 
-	logger.Infof("Discovered %d files in %d streams", totalFiles, len(streamNames))
+	logger.Infof("Discovered %d files in %d streams (after filtering)", totalFiles, len(streamNames))
 	if s.config.StreamGroupingEnabled {
 		logger.Infof("Stream grouping enabled at level %d", s.config.StreamGroupingLevel)
 	}
@@ -327,7 +343,7 @@ func (s *S3) StreamChanges(ctx context.Context, stream types.StreamInterface, pr
 }
 
 // PostCDC is not supported for S3
-func (s *S3) PostCDC(ctx context.Context, stream types.StreamInterface, success bool) error {
+func (s *S3) PostCDC(ctx context.Context, stream types.StreamInterface, success bool, readerID string) error {
 	return fmt.Errorf("CDC is not supported for S3 source")
 }
 

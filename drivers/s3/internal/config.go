@@ -80,9 +80,10 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("region is required when not using custom endpoint")
 	}
 
-	// Validate credentials
-	if c.AccessKeyID == "" || c.SecretAccessKey == "" {
-		return fmt.Errorf("access_key_id and secret_access_key are required")
+	// Validate credentials - both must be provided together or omitted together
+	// If omitted, the driver will fall back to default credential chain (IAM roles, env vars, etc.)
+	if (c.AccessKeyID != "" && c.SecretAccessKey == "") || (c.AccessKeyID == "" && c.SecretAccessKey != "") {
+		return fmt.Errorf("access_key_id and secret_access_key must be provided together or both omitted (for IAM role authentication)")
 	}
 
 	// Validate file format
