@@ -21,14 +21,13 @@
     "access_key_id": {
       "type": "string",
       "title": "Access Key ID",
-      "description": "AWS access key ID for authentication"
+      "description": "AWS access key ID for authentication (optional - if omitted, uses IAM role or default credential chain)"
     },
     "secret_access_key": {
       "type": "string",
       "title": "Secret Access Key",
-      "description": "AWS secret access key for authentication",
-      "format": "password",
-      "minLength": 1
+      "description": "AWS secret access key for authentication (optional - if omitted, uses IAM role or default credential chain)",
+      "format": "password"
     },
     "endpoint": {
       "type": "string",
@@ -114,9 +113,6 @@
   },
   "required": [
     "bucket_name",
-    "region",
-    "access_key_id",
-    "secret_access_key",
     "file_format"
   ]
 }
