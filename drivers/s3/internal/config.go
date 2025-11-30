@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/datazip-inc/olake/constants"
+	"github.com/datazip-inc/olake/drivers/parser"
 )
 
 // FileFormat represents the format of files in S3
@@ -27,7 +28,7 @@ const (
 
 // Config represents the configuration for S3 source connector
 type Config struct {
-	// AWS Connection details
+	// ===== AWS Connection Configuration =====
 	BucketName      string `json:"bucket_name"`
 	Region          string `json:"region"`
 	PathPrefix      string `json:"path_prefix"`
@@ -35,37 +36,25 @@ type Config struct {
 	SecretAccessKey string `json:"secret_access_key"`
 	Endpoint        string `json:"endpoint"` // Optional: for S3-compatible services like MinIO
 
-	// File format configuration
+	// ===== File Format Configuration =====
 	FileFormat  FileFormat      `json:"file_format"`
 	Compression CompressionType `json:"compression"`
 
-	// CSV specific configuration
-	Delimiter      string `json:"delimiter"`       // Default: ","
-	HasHeader      bool   `json:"has_header"`      // Default: true
-	SkipRows       int    `json:"skip_rows"`       // Number of rows to skip at the beginning
-	QuoteCharacter string `json:"quote_character"` // Default: "\""
-
-	// JSON specific configuration
-	JSONLineDelimited bool `json:"json_line_delimited"` // Default: true (JSONL format)
-
-	// Performance tuning
-	MaxThreads int `json:"max_threads"` // Number of concurrent file processors
-	BatchSize  int `json:"batch_size"`  // Number of records to batch before sending
-	RetryCount int `json:"retry_count"` // Number of retries for failed operations
-
-	// File filtering
+	// ===== Performance & Filtering Configuration =====
+	MaxThreads int    `json:"max_threads"` // Number of concurrent file processors
+	BatchSize  int    `json:"batch_size"`  // Number of records to batch before sending
+	RetryCount int    `json:"retry_count"` // Number of retries for failed operations
 	FilePattern string `json:"file_pattern"` // Regex pattern to filter files (optional)
 
-	// Stream grouping strategy
+	// ===== Stream Grouping Configuration =====
 	StreamGroupingEnabled bool   `json:"stream_grouping_enabled"` // Default: true - groups files by folder
 	StreamGroupingLevel   int    `json:"stream_grouping_level"`   // Folder depth for grouping (default: 1)
 	StreamPattern         string `json:"stream_pattern"`          // Regex pattern for custom grouping (Phase 2)
 
-	// Parquet streaming configuration (uses S3 range requests to avoid loading full file in memory)
-	ParquetStreamingEnabled     bool `json:"parquet_streaming_enabled"`       // Default: true - use S3 range requests
-	ParquetRowGroupChunkSizeMB  int  `json:"parquet_row_group_chunk_size_mb"` // Default: 64MB per row group
-	ParquetFooterReadSizeKB     int  `json:"parquet_footer_read_size_kb"`     // Default: 512KB for footer
-	MaxParquetRowGroupsInMemory int  `json:"max_parquet_row_groups_in_memory"` // Default: 1 - process one at a time
+	// ===== Format-Specific Parser Configurations =====
+	CSV     *parser.CSVConfig     `json:"csv,omitempty"`
+	JSON    *parser.JSONConfig    `json:"json,omitempty"`
+	Parquet *parser.ParquetConfig `json:"parquet,omitempty"`
 }
 
 // Validate validates the S3 configuration
@@ -119,24 +108,28 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("invalid compression: must be none, gzip, or zip")
 	}
 
-	// CSV specific validation
-	if c.FileFormat == FormatCSV {
-		if c.Delimiter == "" {
-			c.Delimiter = ","
-		}
-		if c.QuoteCharacter == "" {
-			c.QuoteCharacter = "\""
-		}
-		// Default to true if not specified
-		if !c.HasHeader {
-			c.HasHeader = true
+	// Format-specific validation and defaults
+	if c.FileFormat == FormatCSV && c.CSV == nil {
+		// Initialize with defaults if not provided
+		c.CSV = &parser.CSVConfig{
+			Delimiter:      ",",
+			HasHeader:      true,
+			SkipRows:       0,
+			QuoteCharacter: "\"",
 		}
 	}
 
-	// JSON specific defaults
-	if c.FileFormat == FormatJSON {
-		if !c.JSONLineDelimited {
-			c.JSONLineDelimited = true
+	if c.FileFormat == FormatJSON && c.JSON == nil {
+		// Initialize with defaults if not provided
+		c.JSON = &parser.JSONConfig{
+			LineDelimited: true,
+		}
+	}
+
+	if c.FileFormat == FormatParquet && c.Parquet == nil {
+		// Initialize with defaults if not provided
+		c.Parquet = &parser.ParquetConfig{
+			StreamingEnabled: true,
 		}
 	}
 
@@ -171,27 +164,6 @@ func (c *Config) Validate() error {
 		c.StreamGroupingLevel = 1
 	}
 
-	// Parquet streaming defaults (Phase 1 - Comment 2 implementation)
-	// Default to enabled for memory-efficient processing
-	if !c.ParquetStreamingEnabled {
-		c.ParquetStreamingEnabled = true
-	}
-
-	// Default row group chunk size: 64MB (typical Parquet row group size)
-	if c.ParquetRowGroupChunkSizeMB <= 0 {
-		c.ParquetRowGroupChunkSizeMB = 64
-	}
-
-	// Default footer read size: 512KB (enough for most Parquet footers)
-	if c.ParquetFooterReadSizeKB <= 0 {
-		c.ParquetFooterReadSizeKB = 512
-	}
-
-	// Default to processing one row group at a time (minimize memory)
-	if c.MaxParquetRowGroupsInMemory <= 0 {
-		c.MaxParquetRowGroupsInMemory = 1
-	}
-
 	return nil
 }
 
@@ -201,4 +173,19 @@ type FileObject struct {
 	Size         int64  `json:"size"`
 	LastModified string `json:"last_modified"`
 	ETag         string `json:"etag"`
+}
+
+// GetCSVConfig returns the CSV parser configuration
+func (c *Config) GetCSVConfig() *parser.CSVConfig {
+	return c.CSV
+}
+
+// GetJSONConfig returns the JSON parser configuration
+func (c *Config) GetJSONConfig() *parser.JSONConfig {
+	return c.JSON
+}
+
+// GetParquetConfig returns the Parquet parser configuration
+func (c *Config) GetParquetConfig() *parser.ParquetConfig {
+	return c.Parquet
 }

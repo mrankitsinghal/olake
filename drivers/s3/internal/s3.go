@@ -1,8 +1,11 @@
 package driver
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"fmt"
+	"io"
 	"regexp"
 	"strings"
 
@@ -11,6 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/datazip-inc/olake/drivers/abstract"
+	"github.com/datazip-inc/olake/drivers/parser"
 	"github.com/datazip-inc/olake/types"
 	"github.com/datazip-inc/olake/utils/logger"
 )
@@ -308,21 +312,75 @@ func (s *S3) ProduceSchema(ctx context.Context, streamName string) (*types.Strea
 	var inferredStream *types.Stream
 	var err error
 
-	// Infer schema based on file format
+	// Create appropriate parser and infer schema (format-specific logic from parser package)
 	switch s.config.FileFormat {
 	case FormatCSV:
-		inferredStream, err = s.inferCSVSchema(ctx, stream, firstFile.FileKey)
+		// Get reader for CSV file (S3-specific: handles S3 API, decompression)
+		var reader io.Reader
+		var csvErr error
+		reader, _, csvErr = s.getFileReader(ctx, firstFile.FileKey)
+		if csvErr != nil {
+			return nil, fmt.Errorf("failed to get file reader: %w", csvErr)
+		}
+		defer func() {
+			if closer, ok := reader.(io.Closer); ok {
+				closer.Close()
+			}
+		}()
+		
+		csvParser := parser.NewCSVParser(*s.config.GetCSVConfig(), stream)
+		inferredStream, err = csvParser.InferSchema(ctx, reader)
 	case FormatJSON:
-		inferredStream, err = s.inferJSONSchema(ctx, stream, firstFile.FileKey)
+		// Get reader for JSON file (S3-specific: handles S3 API, decompression)
+		var reader io.Reader
+		var jsonErr error
+		reader, _, jsonErr = s.getFileReader(ctx, firstFile.FileKey)
+		if jsonErr != nil {
+			return nil, fmt.Errorf("failed to get file reader: %w", jsonErr)
+		}
+		defer func() {
+			if closer, ok := reader.(io.Closer); ok {
+				closer.Close()
+			}
+		}()
+		
+		jsonParser := parser.NewJSONParser(*s.config.GetJSONConfig(), stream)
+		inferredStream, err = jsonParser.InferSchema(ctx, reader)
 	case FormatParquet:
-		inferredStream, err = s.inferParquetSchema(ctx, stream, firstFile.FileKey)
+		// For Parquet, we need a special reader that implements io.ReaderAt
+		// Use the firstFile.Size that we got from S3 discovery
+		var parquetReader io.ReaderAt
+		var parquetSize int64
+		var parquetErr error
+		parquetReader, parquetSize, parquetErr = s.getParquetReaderAt(ctx, firstFile.FileKey, firstFile.Size)
+		if parquetErr != nil {
+			return nil, fmt.Errorf("failed to get Parquet reader: %w", parquetErr)
+		}
+		defer func() {
+			if closer, ok := parquetReader.(io.Closer); ok {
+				closer.Close()
+			}
+		}()
+		
+		// Create a wrapper that implements both io.ReaderAt and provides size info
+		wrapper := &parquetReaderWrapper{
+			readerAt: parquetReader,
+			size:     parquetSize,
+		}
+		
+		parquetParser := parser.NewParquetParser(*s.config.GetParquetConfig(), stream)
+		inferredStream, err = parquetParser.InferSchema(ctx, wrapper)
 	default:
 		return nil, fmt.Errorf("unsupported file format: %s", s.config.FileFormat)
 	}
 
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to infer schema: %w", err)
 	}
+
+	// Add _olake_last_modified as a cursor field for incremental sync
+	inferredStream.UpsertField("_olake_last_modified", types.String, false)
+	inferredStream.WithCursorField("_olake_last_modified")
 
 	return inferredStream, nil
 }
@@ -347,25 +405,133 @@ func (s *S3) PostCDC(ctx context.Context, stream types.StreamInterface, success 
 	return fmt.Errorf("CDC is not supported for S3 source")
 }
 
+// getFileReader returns a reader for an S3 file with decompression applied (S3-specific logic)
+// Returns (reader, fileSize, error)
+func (s *S3) getFileReader(ctx context.Context, key string) (io.Reader, int64, error) {
+	// Get the object from S3
+	result, err := s.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(s.config.BucketName),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to get object from S3: %w", err)
+	}
+
+	// Get file size
+	fileSize := int64(0)
+	if result.ContentLength != nil {
+		fileSize = *result.ContentLength
+	}
+
+	// Apply decompression if needed (auto-detect from file extension)
+	reader, err := getDecompressedReader(result.Body, key)
+	if err != nil {
+		result.Body.Close()
+		return nil, 0, fmt.Errorf("failed to create decompressed reader: %w", err)
+	}
+
+	return reader, fileSize, nil
+}
+
+// getParquetReaderAt returns a reader suitable for Parquet files (io.ReaderAt)
+// Uses S3 range reader for streaming or loads into memory based on config
+// Returns (readerAt, fileSize, error)
+func (s *S3) getParquetReaderAt(ctx context.Context, key string, fileSize int64) (io.ReaderAt, int64, error) {
+	parquetConfig := s.config.GetParquetConfig()
+	
+	if parquetConfig.StreamingEnabled && fileSize > 0 {
+		// Use S3 range requests for streaming (memory-efficient)
+		logger.Debugf("Using S3 range requests for Parquet file: %s", key)
+		rangeReader := NewS3RangeReader(ctx, s.client, s.config.BucketName, key, fileSize)
+		return rangeReader, fileSize, nil
+	}
+
+	// Fallback: Load entire file into memory
+	logger.Debugf("Loading Parquet file into memory: %s", key)
+	result, err := s.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(s.config.BucketName),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to get object from S3: %w", err)
+	}
+	defer result.Body.Close()
+
+	data, err := io.ReadAll(result.Body)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to read Parquet file: %w", err)
+	}
+
+	return bytes.NewReader(data), int64(len(data)), nil
+}
+
+// parquetReaderWrapper wraps an io.ReaderAt with size info and implements io.Seeker
+// This allows the Parquet parser to determine file size via Seek
+type parquetReaderWrapper struct {
+	readerAt io.ReaderAt
+	size     int64
+	offset   int64
+}
+
+func (w *parquetReaderWrapper) ReadAt(p []byte, off int64) (n int, err error) {
+	return w.readerAt.ReadAt(p, off)
+}
+
+func (w *parquetReaderWrapper) Seek(offset int64, whence int) (int64, error) {
+	switch whence {
+	case io.SeekStart:
+		w.offset = offset
+	case io.SeekCurrent:
+		w.offset += offset
+	case io.SeekEnd:
+		w.offset = w.size + offset
+	default:
+		return 0, fmt.Errorf("invalid whence: %d", whence)
+	}
+
+	if w.offset < 0 {
+		w.offset = 0
+	}
+	if w.offset > w.size {
+		w.offset = w.size
+	}
+
+	return w.offset, nil
+}
+
+func (w *parquetReaderWrapper) Read(p []byte) (n int, err error) {
+	n, err = w.readerAt.ReadAt(p, w.offset)
+	w.offset += int64(n)
+	return n, err
+}
+
+// getReader returns an appropriate reader based on file extension (S3 method wrapper)
+// Auto-detects compression from file extension (.gz)
+func (s *S3) getReader(body io.Reader, key string) (io.Reader, error) {
+	return getDecompressedReader(body, key)
+}
+
+// getDecompressedReader returns an appropriate reader based on file extension
+// Auto-detects compression from file extension (.gz)
+func getDecompressedReader(body io.Reader, key string) (io.Reader, error) {
+	lowerKey := strings.ToLower(key)
+
+	// Check if file has gzip extension
+	if strings.HasSuffix(lowerKey, ".gz") {
+		gzipReader, err := gzip.NewReader(body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create gzip reader: %w", err)
+		}
+		logger.Debugf("Using gzip decompression for file: %s", key)
+		return gzipReader, nil
+	}
+
+	// No compression detected, return body as-is
+	return body, nil
+}
+
 // CloseConnection closes the S3 client connection
 func (s *S3) CloseConnection() {
 	logger.Info("Closing S3 connection")
 	// S3 client doesn't require explicit cleanup
-}
-
-// getFileSize retrieves the file size from discovered files
-// Returns 0 if file not found (fallback to non-streaming mode)
-func (s *S3) getFileSize(streamName, fileKey string) int64 {
-	files, exists := s.discoveredFiles[streamName]
-	if !exists {
-		return 0
-	}
-
-	for _, file := range files {
-		if file.FileKey == fileKey {
-			return file.Size
-		}
-	}
-
-	return 0
 }

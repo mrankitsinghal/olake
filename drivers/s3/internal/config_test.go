@@ -170,9 +170,10 @@ func TestConfigDefaults(t *testing.T) {
 
 	// Check defaults
 	assert.Equal(t, CompressionNone, config.Compression, "default compression should be 'none'")
-	assert.Equal(t, ",", config.Delimiter, "default CSV delimiter should be ','")
-	assert.Equal(t, "\"", config.QuoteCharacter, "default quote character should be '\"'")
-	assert.Equal(t, true, config.HasHeader, "default has_header should be true")
+	assert.NotNil(t, config.CSV, "CSV config should be initialized")
+	assert.Equal(t, ",", config.CSV.Delimiter, "default CSV delimiter should be ','")
+	assert.Equal(t, "\"", config.CSV.QuoteCharacter, "default quote character should be '\"'")
+	assert.Equal(t, true, config.CSV.HasHeader, "default has_header should be true")
 	assert.Equal(t, 10000, config.BatchSize, "default batch size should be 10000")
 	assert.Equal(t, constants.DefaultThreadCount, config.MaxThreads, "default max threads should match constant")
 	assert.Equal(t, constants.DefaultRetryCount, config.RetryCount, "default retry count should match constant")
@@ -190,9 +191,10 @@ func TestConfigCSVDefaults(t *testing.T) {
 	err := config.Validate()
 	assert.NoError(t, err)
 
-	assert.Equal(t, ",", config.Delimiter)
-	assert.Equal(t, "\"", config.QuoteCharacter)
-	assert.Equal(t, true, config.HasHeader)
+	assert.NotNil(t, config.CSV, "CSV config should be initialized")
+	assert.Equal(t, ",", config.CSV.Delimiter)
+	assert.Equal(t, "\"", config.CSV.QuoteCharacter)
+	assert.Equal(t, true, config.CSV.HasHeader)
 }
 
 func TestConfigJSONDefaults(t *testing.T) {
@@ -207,7 +209,8 @@ func TestConfigJSONDefaults(t *testing.T) {
 	err := config.Validate()
 	assert.NoError(t, err)
 
-	assert.Equal(t, true, config.JSONLineDelimited)
+	assert.NotNil(t, config.JSON, "JSON config should be initialized")
+	assert.Equal(t, true, config.JSON.LineDelimited)
 }
 
 func TestConfigParquetDefaults(t *testing.T) {
@@ -222,7 +225,8 @@ func TestConfigParquetDefaults(t *testing.T) {
 	err := config.Validate()
 	assert.NoError(t, err)
 
-	// Parquet format doesn't need special defaults, just verify it validates
+	assert.NotNil(t, config.Parquet, "Parquet config should be initialized")
+	assert.Equal(t, true, config.Parquet.StreamingEnabled, "default streaming should be enabled")
 	assert.Equal(t, FormatParquet, config.FileFormat)
 }
 

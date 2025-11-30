@@ -14,12 +14,99 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/datazip-inc/olake/destination"
 	"github.com/datazip-inc/olake/drivers/abstract"
+	"github.com/datazip-inc/olake/drivers/parser"
 	"github.com/datazip-inc/olake/types"
 	"github.com/datazip-inc/olake/utils/logger"
 	pq "github.com/parquet-go/parquet-go"
 )
 
+// ============================================
+// SECTION 1: Cursor & Filtering
+// ============================================
+// This section handles the unified cursor-based filtering logic
+// that enables both backfill (cursor="") and incremental (cursor=timestamp) modes
+
+// getCursorFromState retrieves the cursor timestamp from state
+// Returns empty string for backfill (no state), or the last synced timestamp for incremental
+//
+// Backfill mode: No cursor configured or no previous state → returns ""
+// Incremental mode: Cursor exists in state → returns timestamp (e.g., "2024-01-02T10:00:00Z")
+func (s *S3) getCursorFromState(stream types.StreamInterface) string {
+	// Try to cast to ConfiguredStream to access state
+	configuredStream, ok := stream.(*types.ConfiguredStream)
+	if !ok {
+		// Not a configured stream, this is backfill - return empty string (process all files)
+		logger.Debugf("Stream %s is not configured, using backfill mode (cursor: epoch)", stream.Name())
+		return ""
+	}
+
+	// Get primary cursor field from stream configuration
+	primaryCursor, _ := configuredStream.Cursor()
+	if primaryCursor == "" {
+		// No cursor configured, this is backfill
+		logger.Debugf("Stream %s has no cursor configured, using backfill mode (cursor: epoch)", stream.Name())
+		return ""
+	}
+
+	// Get cursor value from state
+	cursorValue := s.state.GetCursor(configuredStream, primaryCursor)
+	if cursorValue == nil {
+		// First sync - return empty string (process all files)
+		logger.Infof("Stream %s has no previous state, using backfill mode (cursor: epoch)", stream.Name())
+		return ""
+	}
+
+	// Parse cursor as string (timestamp format: 2006-01-02T15:04:05Z)
+	lastSynced, ok := cursorValue.(string)
+	if !ok {
+		logger.Warnf("Invalid cursor format in state for stream %s, using backfill mode", stream.Name())
+		return ""
+	}
+
+	logger.Infof("Stream %s using incremental mode (cursor: %s)", stream.Name(), lastSynced)
+	return lastSynced
+}
+
+// filterFilesByCursor filters files based on LastModified timestamp cursor
+// This is the core logic that unifies backfill and incremental sync:
+//
+// For backfill (empty cursor):     Returns all files
+// For incremental (cursor != ""):  Returns only files where LastModified > cursor
+//
+// The cursor timestamp is in ISO 8601 format (2006-01-02T15:04:05Z) and uses
+// string comparison which works correctly for this format.
+func (s *S3) filterFilesByCursor(files []FileObject, cursorTimestamp string) []FileObject {
+	// If no cursor (backfill), return all files
+	if cursorTimestamp == "" {
+		logger.Debugf("No cursor timestamp, processing all %d files (backfill mode)", len(files))
+		return files
+	}
+
+	// Filter files modified after cursor
+	var filteredFiles []FileObject
+	for _, file := range files {
+		if file.LastModified > cursorTimestamp {
+			filteredFiles = append(filteredFiles, file)
+			logger.Debugf("File %s will be processed (modified: %s > cursor: %s)", 
+				file.FileKey, file.LastModified, cursorTimestamp)
+		} else {
+			logger.Debugf("File %s skipped (modified: %s <= cursor: %s)", 
+				file.FileKey, file.LastModified, cursorTimestamp)
+		}
+	}
+
+	logger.Infof("Filtered %d files to process out of %d total (incremental mode, cursor: %s)", 
+		len(filteredFiles), len(files), cursorTimestamp)
+	return filteredFiles
+}
+
+// ============================================
+// SECTION 2: Chunk Management
+// ============================================
+// This section handles grouping files into optimized chunks for parallel processing
+
 // GetOrSplitChunks returns chunks for parallel processing of files
+// Unified implementation: filters files by cursor (epoch for backfill, state value for incremental)
 // Groups multiple small files into ~2GB chunks to reduce state size
 // Large files (>2GB) are kept as individual chunks
 func (s *S3) GetOrSplitChunks(ctx context.Context, pool *destination.WriterPool, stream types.StreamInterface) (*types.Set[types.Chunk], error) {
@@ -31,10 +118,24 @@ func (s *S3) GetOrSplitChunks(ctx context.Context, pool *destination.WriterPool,
 		return types.NewSet[types.Chunk](), nil
 	}
 
-	// Calculate total file size across all files in the stream
+	// Get cursor from state for incremental filtering
+	// For backfill (no state), this returns empty string which means all files pass the filter
+	cursorTimestamp := s.getCursorFromState(stream)
+	
+	// Filter files based on LastModified cursor
+	filesToProcess := s.filterFilesByCursor(files, cursorTimestamp)
+	
+	if len(filesToProcess) == 0 {
+		logger.Infof("No files to process for stream %s after cursor filtering (cursor: %s)", streamName, cursorTimestamp)
+		return types.NewSet[types.Chunk](), nil
+	}
+
+	logger.Infof("Processing %d files for stream %s (filtered from %d total, cursor: %s)", 
+		len(filesToProcess), streamName, len(files), cursorTimestamp)
+
+	// Calculate total file size across files to process
 	var totalSize int64
-	totalFiles := len(files)
-	for _, file := range files {
+	for _, file := range filesToProcess {
 		totalSize += file.Size
 	}
 
@@ -50,13 +151,13 @@ func (s *S3) GetOrSplitChunks(ctx context.Context, pool *destination.WriterPool,
 	}
 
 	// Use file count as a proxy for sync stats instead of estimated rows
-	pool.AddRecordsToSyncStats(int64(totalFiles))
+	pool.AddRecordsToSyncStats(int64(len(filesToProcess)))
 
 	// Group files into chunks based on size to optimize state storage and parallel processing
-	chunks := s.groupFilesIntoChunks(files)
+	chunks := s.groupFilesIntoChunks(filesToProcess)
 
 	logger.Infof("Creating %d chunks for stream %s (total files: %d, total size: %s)",
-		chunks.Len(), streamName, totalFiles, sizeDisplay)
+		chunks.Len(), streamName, len(filesToProcess), sizeDisplay)
 
 	return chunks, nil
 }
@@ -84,10 +185,10 @@ func (s *S3) groupFilesIntoChunks(files []FileObject) *types.Set[types.Chunk] {
 				currentChunkSize = 0
 			}
 
-			// Add large file as separate chunk
+			// Add large file as separate chunk (array with single element for consistency)
 			chunks.Insert(types.Chunk{
-				Min: file.FileKey,  // Single file key (string)
-				Max: file.Size,     // File size
+				Min: []string{file.FileKey},  // Array of one file key (consistent with small files)
+				Max: file.Size,               // File size
 			})
 			logger.Debugf("Large file (%d MB) in separate chunk: %s", 
 				file.Size/(1024*1024), file.FileKey)
@@ -125,14 +226,23 @@ func (s *S3) groupFilesIntoChunks(files []FileObject) *types.Set[types.Chunk] {
 	return chunks
 }
 
+// ============================================
+// SECTION 3: Chunk Processing
+// ============================================
+// This section handles reading and processing records from S3 files
+
 // ChunkIterator reads and processes records from an S3 file or multiple files
-// Handles both single file chunks (Min = string) and multi-file chunks (Min = []string)
+// Handles chunks as arrays (Min = []string): single file = array size 1, grouped files = array size > 1
 func (s *S3) ChunkIterator(ctx context.Context, stream types.StreamInterface, chunk types.Chunk, processFn abstract.BackfillMsgFn) error {
-	// Check if this is a multi-file chunk or single file chunk
+	// Check if this is a typed array or interface array (from JSON state deserialization)
 	switch v := chunk.Min.(type) {
 	case []string:
-		// Multi-file chunk - process each file sequentially within the chunk
-		logger.Infof("Processing chunk with %d files", len(v))
+		// Chunk with file(s) - process each file sequentially
+		// Single large file: array size = 1
+		// Grouped small files: array size > 1
+		// TODO: Consider parallelizing file processing within chunks for better performance
+		// OR simplify by making each file its own chunk (remove grouping logic entirely)
+		logger.Infof("Processing chunk with %d file(s)", len(v))
 		for i, key := range v {
 			logger.Debugf("Processing file %d/%d in chunk: %s", i+1, len(v), key)
 			fileSize := s.getFileSize(stream.Name(), key)
@@ -143,8 +253,9 @@ func (s *S3) ChunkIterator(ctx context.Context, stream types.StreamInterface, ch
 		return nil
 
 	case []interface{}:
-		// Handle []interface{} from state deserialization
-		logger.Infof("Processing chunk with %d files (interface array)", len(v))
+		// Handle []interface{} from state deserialization after restart
+		// JSON unmarshaling converts []string to []interface{} when Min is type `any`
+		logger.Infof("Processing chunk with %d file(s) (from state)", len(v))
 		for i, item := range v {
 			key, ok := item.(string)
 			if !ok {
@@ -158,79 +269,157 @@ func (s *S3) ChunkIterator(ctx context.Context, stream types.StreamInterface, ch
 		}
 		return nil
 
-	case string:
-		// Single file chunk - process directly
-		key := v
-		var fileSize int64
-		if chunk.Max != nil {
-			if size, ok := chunk.Max.(int64); ok {
-				fileSize = size
-			}
-		}
-		logger.Infof("Processing single file: %s (size: %d bytes)", key, fileSize)
-		return s.processFile(ctx, stream, key, fileSize, processFn)
-
 	default:
-		return fmt.Errorf("invalid chunk Min type: expected string or []string, got %T", chunk.Min)
+		return fmt.Errorf("invalid chunk Min type: expected []string, got %T", chunk.Min)
 	}
 }
 
-// processFile handles the processing of a single S3 file
+// processFile handles the processing of a single S3 file using the parser package
 func (s *S3) processFile(ctx context.Context, stream types.StreamInterface, key string, fileSize int64, processFn abstract.BackfillMsgFn) error {
-
-	// For Parquet with streaming enabled, use range requests
-	if s.config.FileFormat == FormatParquet && s.config.ParquetStreamingEnabled && fileSize > 0 {
-		return s.processParquetFileStreaming(ctx, key, fileSize, processFn)
-	}
-
-	// For other formats or fallback, use standard streaming from S3
-	result, err := s.client.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(s.config.BucketName),
-		Key:    aws.String(key),
-	})
+	// Get reader for the file (S3-specific: handles S3 API, decompression, range requests)
+	reader, err := s.getStreamReader(ctx, key, fileSize)
 	if err != nil {
 		// Check if file was deleted between discovery and processing
 		if strings.Contains(err.Error(), "NoSuchKey") || strings.Contains(err.Error(), "NotFound") {
 			logger.Warnf("File %s was deleted or not found, skipping", key)
 			return nil // Don't fail the entire sync for a missing file
 		}
-		return fmt.Errorf("failed to get object from S3: %w", err)
+		return fmt.Errorf("failed to get reader: %w", err)
 	}
-	defer result.Body.Close()
+	defer func() {
+		if closer, ok := reader.(io.Closer); ok {
+			closer.Close()
+		}
+	}()
 
-	// Wrap with decompression reader if needed
-	reader, err := s.getReader(result.Body, key)
-	if err != nil {
-		return fmt.Errorf("failed to create reader: %w", err)
-	}
-	if closer, ok := reader.(io.Closer); ok {
-		defer closer.Close()
+	// Create callback adapter from abstract.BackfillMsgFn to parser.RecordCallback
+	callback := func(ctx context.Context, record map[string]any) error {
+		return processFn(ctx, record)
 	}
 
-	// Process based on file format
+	// Use appropriate parser based on file format
+	// Note: stream is StreamInterface, we need to get the underlying Stream for the parser
+	underlyingStream := &types.Stream{
+		Name:      stream.Name(),
+		Namespace: stream.Namespace(),
+		Schema:    stream.Schema(),
+	}
+	
+	var parseErr error
 	switch s.config.FileFormat {
 	case FormatCSV:
-		return s.processCSVFile(ctx, reader, stream, processFn)
+		csvParser := parser.NewCSVParser(*s.config.GetCSVConfig(), underlyingStream)
+		parseErr = csvParser.StreamRecords(ctx, reader, s.config.BatchSize, callback)
 	case FormatJSON:
-		return s.processJSONFile(ctx, reader, processFn)
+		jsonParser := parser.NewJSONParser(*s.config.GetJSONConfig(), underlyingStream)
+		parseErr = jsonParser.StreamRecords(ctx, reader, s.config.BatchSize, callback)
 	case FormatParquet:
-		// Fallback to in-memory processing if streaming disabled
-		return s.processParquetFile(ctx, reader, processFn)
+		// For Parquet, use the streaming implementation with range requests if enabled
+		parquetConfig := s.config.GetParquetConfig()
+		if parquetConfig.StreamingEnabled && fileSize > 0 {
+			// Use S3 range reader for streaming
+			return s.processParquetFileStreamingWithParser(ctx, stream, key, fileSize, processFn)
+		}
+		// Fallback: load into memory and parse
+		parquetParser := parser.NewParquetParser(*parquetConfig, underlyingStream)
+		parseErr = parquetParser.StreamRecords(ctx, reader, s.config.BatchSize, callback)
 	default:
 		return fmt.Errorf("unsupported file format: %s", s.config.FileFormat)
 	}
+
+	if parseErr != nil {
+		return fmt.Errorf("failed to process file %s: %w", key, parseErr)
+	}
+
+	return nil
 }
+
+// getStreamReader returns a reader for streaming file data (S3-specific logic)
+func (s *S3) getStreamReader(ctx context.Context, key string, fileSize int64) (io.Reader, error) {
+	// Get the object from S3
+	result, err := s.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(s.config.BucketName),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get object from S3: %w", err)
+	}
+
+	// Apply decompression if needed (auto-detect from file extension)
+	reader, err := s.getReader(result.Body, key)
+	if err != nil {
+		result.Body.Close()
+		return nil, fmt.Errorf("failed to create decompressed reader: %w", err)
+	}
+
+	return reader, nil
+}
+
+// processParquetFileStreamingWithParser uses S3 range requests with the parser package
+func (s *S3) processParquetFileStreamingWithParser(ctx context.Context, stream types.StreamInterface, key string, fileSize int64, processFn abstract.BackfillMsgFn) error {
+	logger.Infof("Processing Parquet file with streaming (S3 range requests): %s (size: %.2f MB)",
+		key, float64(fileSize)/(1024*1024))
+
+	// Create S3 range reader
+	rangeReader := NewS3RangeReader(ctx, s.client, s.config.BucketName, key, fileSize)
+	
+	// Wrap reader to make it compatible with parser requirements
+	wrapper := &parquetReaderWrapper{
+		readerAt: rangeReader,
+		size:     fileSize,
+	}
+
+	// Create callback adapter
+	callback := func(ctx context.Context, record map[string]any) error {
+		return processFn(ctx, record)
+	}
+
+	// Use parser to stream records
+	// Note: stream is StreamInterface, we need to get the underlying Stream for the parser
+	underlyingStream := &types.Stream{
+		Name:      stream.Name(),
+		Namespace: stream.Namespace(),
+		Schema:    stream.Schema(),
+	}
+	
+	parquetParser := parser.NewParquetParser(*s.config.GetParquetConfig(), underlyingStream)
+	return parquetParser.StreamRecords(ctx, wrapper, s.config.BatchSize, callback)
+}
+
+// getFileSize retrieves the file size from discovered files
+// Returns 0 if file not found (fallback to non-streaming mode)
+func (s *S3) getFileSize(streamName, fileKey string) int64 {
+	files, exists := s.discoveredFiles[streamName]
+	if !exists {
+		return 0
+	}
+
+	for _, file := range files {
+		if file.FileKey == fileKey {
+			return file.Size
+		}
+	}
+
+	return 0
+}
+
+// ============================================
+// SECTION 4: Format-Specific Processors
+// ============================================
+// This section contains processors for different file formats: CSV, JSON, and Parquet
 
 // processCSVFile reads and processes a CSV file
 func (s *S3) processCSVFile(ctx context.Context, reader io.Reader, stream types.StreamInterface, processFn abstract.BackfillMsgFn) error {
+	csvConfig := s.config.GetCSVConfig()
+	
 	csvReader := csv.NewReader(reader)
-	csvReader.Comma = rune(s.config.Delimiter[0])
-	if s.config.QuoteCharacter != "" {
+	csvReader.Comma = rune(csvConfig.Delimiter[0])
+	if csvConfig.QuoteCharacter != "" {
 		csvReader.LazyQuotes = true
 	}
 
 	// Skip rows if configured
-	for i := 0; i < s.config.SkipRows; i++ {
+	for i := 0; i < csvConfig.SkipRows; i++ {
 		_, err := csvReader.Read()
 		if err != nil {
 			return fmt.Errorf("failed to skip row %d: %w", i, err)
@@ -238,7 +427,7 @@ func (s *S3) processCSVFile(ctx context.Context, reader io.Reader, stream types.
 	}
 
 	var headers []string
-	if s.config.HasHeader {
+	if csvConfig.HasHeader {
 		// Read header row
 		var err error
 		headers, err = csvReader.Read()
@@ -327,9 +516,10 @@ func (s *S3) processCSVFile(ctx context.Context, reader io.Reader, stream types.
 
 // processJSONFile reads and processes a JSON file
 func (s *S3) processJSONFile(ctx context.Context, reader io.Reader, processFn abstract.BackfillMsgFn) error {
+	jsonConfig := s.config.GetJSONConfig()
 	recordCount := 0
 
-	if s.config.JSONLineDelimited {
+	if jsonConfig.LineDelimited {
 		// Line-delimited JSON (JSONL)
 		decoder := json.NewDecoder(reader)
 
@@ -613,7 +803,6 @@ func (s *S3) parquetValueToInterface(val pq.Value) interface{} {
 	}
 }
 
-
 // convertValue converts a string value to the appropriate type
 func (s *S3) convertValue(value string, fieldType types.DataType) interface{} {
 	if value == "" || value == "null" {
@@ -642,3 +831,55 @@ func (s *S3) convertValue(value string, fieldType types.DataType) interface{} {
 	// Default to string
 	return value
 }
+
+// ============================================
+// SECTION 5: Incremental-Specific Methods
+// ============================================
+// This section contains methods specific to incremental sync operations
+
+// FetchMaxCursorValues returns the maximum LastModified timestamp for all files in the stream
+// This is used by the abstract layer to track incremental sync progress
+func (s *S3) FetchMaxCursorValues(ctx context.Context, stream types.StreamInterface) (any, any, error) {
+	streamName := stream.Name()
+	
+	files, exists := s.discoveredFiles[streamName]
+	if !exists || len(files) == 0 {
+		logger.Debugf("No files found for stream %s, returning nil cursor", streamName)
+		return nil, nil, nil
+	}
+
+	// Find the latest LastModified timestamp among all files in this stream
+	var maxLastModified string
+	for _, file := range files {
+		if file.LastModified > maxLastModified {
+			maxLastModified = file.LastModified
+		}
+	}
+
+	logger.Infof("Max cursor value for stream %s: %s (from %d files)", streamName, maxLastModified, len(files))
+	
+	// Return as primary cursor (secondary cursor not used for S3)
+	return maxLastModified, nil, nil
+}
+
+// StreamIncrementalChanges is called by the abstract layer after backfill completes
+// For S3, all incremental work is already done by GetOrSplitChunks + Backfill via cursor filtering:
+//   1. GetOrSplitChunks filters files by cursor (empty for full-load, timestamp for incremental)
+//   2. Backfill processes chunks in parallel via connection groups
+//   3. This method becomes a no-op since all work is already complete
+func (s *S3) StreamIncrementalChanges(ctx context.Context, stream types.StreamInterface, cb abstract.BackfillMsgFn) error {
+	streamName := stream.Name()
+	
+	logger.Infof("Incremental sync already completed for stream %s via unified chunk processing", streamName)
+	
+	// All files have already been processed by the Backfill phase which:
+	// - Called GetOrSplitChunks (with cursor-based filtering)
+	// - Grouped files into optimized 2GB chunks
+	// - Processed chunks in parallel via abstract layer connection groups
+	//
+	// No additional work needed here - cursor filtering ensures only new/modified files
+	// were included in the chunks that were already processed.
+	
+	return nil
+}
+

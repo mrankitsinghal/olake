@@ -49,36 +49,63 @@
       "enum": ["none", "gzip", "zip"],
       "default": "none"
     },
-    "delimiter": {
-      "type": "string",
-      "title": "CSV Delimiter",
-      "description": "Delimiter character for CSV files",
-      "default": ","
+    "csv": {
+      "type": "object",
+      "title": "CSV Configuration",
+      "description": "CSV format-specific settings (only used when file_format is 'csv')",
+      "properties": {
+        "delimiter": {
+          "type": "string",
+          "title": "Delimiter",
+          "description": "Delimiter character for CSV files",
+          "default": ","
+        },
+        "has_header": {
+          "type": "boolean",
+          "title": "Has Header",
+          "description": "Whether CSV files contain a header row",
+          "default": true
+        },
+        "skip_rows": {
+          "type": "integer",
+          "title": "Skip Rows",
+          "description": "Number of rows to skip at the beginning of CSV files",
+          "default": 0,
+          "minimum": 0
+        },
+        "quote_character": {
+          "type": "string",
+          "title": "Quote Character",
+          "description": "Quote character for CSV fields",
+          "default": "\""
+        }
+      }
     },
-    "has_header": {
-      "type": "boolean",
-      "title": "CSV Has Header",
-      "description": "Whether CSV files contain a header row",
-      "default": true
+    "json": {
+      "type": "object",
+      "title": "JSON Configuration",
+      "description": "JSON format-specific settings (only used when file_format is 'json')",
+      "properties": {
+        "line_delimited": {
+          "type": "boolean",
+          "title": "Line Delimited",
+          "description": "Use line-delimited JSON (JSONL) format instead of JSON array",
+          "default": true
+        }
+      }
     },
-    "skip_rows": {
-      "type": "integer",
-      "title": "Skip Rows",
-      "description": "Number of rows to skip at the beginning of CSV files",
-      "default": 0,
-      "minimum": 0
-    },
-    "quote_character": {
-      "type": "string",
-      "title": "Quote Character",
-      "description": "Quote character for CSV fields",
-      "default": "\""
-    },
-    "json_line_delimited": {
-      "type": "boolean",
-      "title": "JSON Line Delimited",
-      "description": "Use line-delimited JSON (JSONL) format instead of JSON array",
-      "default": true
+    "parquet": {
+      "type": "object",
+      "title": "Parquet Configuration",
+      "description": "Parquet format-specific settings (only used when file_format is 'parquet')",
+      "properties": {
+        "streaming_enabled": {
+          "type": "boolean",
+          "title": "Streaming Enabled",
+          "description": "Use S3 range requests for memory-efficient streaming (recommended for large files)",
+          "default": true
+        }
+      }
     },
     "file_pattern": {
       "type": "string",
