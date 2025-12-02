@@ -130,3 +130,6 @@ require (
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+// TODO: Remove this replace directive after releasing olake v0.3.x with parser package
+replace github.com/datazip-inc/olake => ../..
