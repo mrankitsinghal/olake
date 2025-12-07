@@ -19,6 +19,11 @@ import (
 	"github.com/datazip-inc/olake/utils/logger"
 )
 
+const (
+	// olakeLastModifiedField is the field name used for tracking file modification timestamps for incremental sync
+	olakeLastModifiedField = "_olake_last_modified"
+)
+
 // S3 represents the S3 source driver
 type S3 struct {
 	client          *s3.Client
@@ -311,58 +316,11 @@ func (s *S3) ProduceSchema(ctx context.Context, streamName string) (*types.Strea
 	// Create appropriate parser and infer schema (format-specific logic from parser package)
 	switch s.config.FileFormat {
 	case FormatCSV:
-		// Get reader for CSV file (S3-specific: handles S3 API, decompression)
-		var reader io.Reader
-		var csvErr error
-		reader, _, csvErr = s.getFileReader(ctx, firstFile.FileKey)
-		if csvErr != nil {
-			return nil, fmt.Errorf("failed to get file reader: %w", csvErr)
-		}
-		defer func() {
-			if closer, ok := reader.(io.Closer); ok {
-				closer.Close()
-			}
-		}()
-		
-		csvParser := parser.NewCSVParser(*s.config.GetCSVConfig(), stream)
-		inferredStream, err = csvParser.InferSchema(ctx, reader)
+		inferredStream, err = s.inferSchemaForCSV(ctx, firstFile, stream)
 	case FormatJSON:
-		// Get reader for JSON file (S3-specific: handles S3 API, decompression)
-		var reader io.Reader
-		var jsonErr error
-		reader, _, jsonErr = s.getFileReader(ctx, firstFile.FileKey)
-		if jsonErr != nil {
-			return nil, fmt.Errorf("failed to get file reader: %w", jsonErr)
-		}
-		defer func() {
-			if closer, ok := reader.(io.Closer); ok {
-				closer.Close()
-			}
-		}()
-		
-		jsonParser := parser.NewJSONParser(*s.config.GetJSONConfig(), stream)
-		inferredStream, err = jsonParser.InferSchema(ctx, reader)
+		inferredStream, err = s.inferSchemaForJSON(ctx, firstFile, stream)
 	case FormatParquet:
-		// For Parquet, we need a special reader that implements io.ReaderAt
-		// Use the firstFile.Size that we got from S3 discovery
-		var parquetReader io.ReaderAt
-		var parquetSize int64
-		var parquetErr error
-		parquetReader, parquetSize, parquetErr = s.getParquetReaderAt(ctx, firstFile.FileKey, firstFile.Size)
-		if parquetErr != nil {
-			return nil, fmt.Errorf("failed to get Parquet reader: %w", parquetErr)
-		}
-		defer func() {
-			if closer, ok := parquetReader.(io.Closer); ok {
-				closer.Close()
-			}
-		}()
-		
-		// Create a wrapper that implements both io.ReaderAt and provides size info
-		wrapper := parser.NewParquetReaderWrapper(parquetReader, parquetSize)
-		
-		parquetParser := parser.NewParquetParser(*s.config.GetParquetConfig(), stream)
-		inferredStream, err = parquetParser.InferSchema(ctx, wrapper)
+		inferredStream, err = s.inferSchemaForParquet(ctx, firstFile, stream)
 	default:
 		return nil, fmt.Errorf("unsupported file format: %s", s.config.FileFormat)
 	}
@@ -372,10 +330,68 @@ func (s *S3) ProduceSchema(ctx context.Context, streamName string) (*types.Strea
 	}
 
 	// Add _olake_last_modified as a cursor field for incremental sync
-	inferredStream.UpsertField("_olake_last_modified", types.String, false)
-	inferredStream.WithCursorField("_olake_last_modified")
+	inferredStream.UpsertField(olakeLastModifiedField, types.String, false)
+	inferredStream.WithCursorField(olakeLastModifiedField)
 
 	return inferredStream, nil
+}
+
+// withFileReader is a helper that manages file reader lifecycle for CSV/JSON formats
+// It acquires a reader, ensures cleanup, and executes the provided callback
+func (s *S3) withFileReader(ctx context.Context, fileKey string, callback func(io.Reader) (*types.Stream, error)) (*types.Stream, error) {
+	reader, _, err := s.getFileReader(ctx, fileKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get file reader: %w", err)
+	}
+	defer func() {
+		if closer, ok := reader.(io.Closer); ok {
+			closer.Close()
+		}
+	}()
+
+	return callback(reader)
+}
+
+// withParquetReader is a helper that manages Parquet reader lifecycle
+// It acquires a ReaderAt, ensures cleanup, and executes the provided callback
+func (s *S3) withParquetReader(ctx context.Context, fileKey string, fileSize int64, callback func(io.Reader) (*types.Stream, error)) (*types.Stream, error) {
+	parquetReader, parquetSize, err := s.getParquetReaderAt(ctx, fileKey, fileSize)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get Parquet reader: %w", err)
+	}
+	defer func() {
+		if closer, ok := parquetReader.(io.Closer); ok {
+			closer.Close()
+		}
+	}()
+
+	// Create a wrapper that implements both io.ReaderAt and provides size info
+	wrapper := parser.NewParquetReaderWrapper(parquetReader, parquetSize)
+	return callback(wrapper)
+}
+
+// inferSchemaForCSV infers schema from a CSV file
+func (s *S3) inferSchemaForCSV(ctx context.Context, file FileObject, stream *types.Stream) (*types.Stream, error) {
+	return s.withFileReader(ctx, file.FileKey, func(reader io.Reader) (*types.Stream, error) {
+		csvParser := parser.NewCSVParser(*s.config.GetCSVConfig(), stream)
+		return csvParser.InferSchema(ctx, reader)
+	})
+}
+
+// inferSchemaForJSON infers schema from a JSON file
+func (s *S3) inferSchemaForJSON(ctx context.Context, file FileObject, stream *types.Stream) (*types.Stream, error) {
+	return s.withFileReader(ctx, file.FileKey, func(reader io.Reader) (*types.Stream, error) {
+		jsonParser := parser.NewJSONParser(*s.config.GetJSONConfig(), stream)
+		return jsonParser.InferSchema(ctx, reader)
+	})
+}
+
+// inferSchemaForParquet infers schema from a Parquet file
+func (s *S3) inferSchemaForParquet(ctx context.Context, file FileObject, stream *types.Stream) (*types.Stream, error) {
+	return s.withParquetReader(ctx, file.FileKey, file.Size, func(reader io.Reader) (*types.Stream, error) {
+		parquetParser := parser.NewParquetParser(*s.config.GetParquetConfig(), stream)
+		return parquetParser.InferSchema(ctx, reader)
+	})
 }
 
 // CDCSupported returns false as S3 does not support CDC
@@ -456,12 +472,6 @@ func (s *S3) getParquetReaderAt(ctx context.Context, key string, fileSize int64)
 	}
 
 	return bytes.NewReader(data), int64(len(data)), nil
-}
-
-// getReader returns an appropriate reader based on file extension (S3 method wrapper)
-// Auto-detects compression from file extension (.gz)
-func (s *S3) getReader(body io.Reader, key string) (io.Reader, error) {
-	return getDecompressedReader(body, key)
 }
 
 // getDecompressedReader returns an appropriate reader based on file extension

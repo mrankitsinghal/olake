@@ -6,8 +6,6 @@ import (
 	"io"
 	"strings"
 
-	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/datazip-inc/olake/destination"
 	"github.com/datazip-inc/olake/drivers/abstract"
 	"github.com/datazip-inc/olake/drivers/parser"
@@ -167,18 +165,25 @@ func (s *S3) groupFilesIntoChunks(files []FileObject) *types.Set[types.Chunk] {
 	var currentChunkFiles []string
 	var currentChunkSize int64
 
+	// Helper to flush accumulated files into a chunk
+	flushChunk := func() {
+		if len(currentChunkFiles) > 0 {
+			chunks.Insert(types.Chunk{
+				Min: currentChunkFiles,  // Array of file keys
+				Max: currentChunkSize,   // Total size of files in this chunk
+			})
+			logger.Debugf("Created chunk with %d files (%d MB)", 
+				len(currentChunkFiles), currentChunkSize/(1024*1024))
+			currentChunkFiles = nil
+			currentChunkSize = 0
+		}
+	}
+
 	for _, file := range files {
 		// Large files get their own chunk (single file per chunk)
 		if file.Size >= largeFileThreshold {
 			// Flush any accumulated small files first
-			if len(currentChunkFiles) > 0 {
-				chunks.Insert(types.Chunk{
-					Min: currentChunkFiles,  // Array of file keys
-					Max: currentChunkSize,   // Total size of files in this chunk
-				})
-				currentChunkFiles = nil
-				currentChunkSize = 0
-			}
+			flushChunk()
 
 			// Add large file as separate chunk (array with single element for consistency)
 			chunks.Insert(types.Chunk{
@@ -193,14 +198,7 @@ func (s *S3) groupFilesIntoChunks(files []FileObject) *types.Set[types.Chunk] {
 		// Group small files into chunks
 		if currentChunkSize+file.Size > targetChunkSize && len(currentChunkFiles) > 0 {
 			// Current chunk would exceed target size, flush it
-			chunks.Insert(types.Chunk{
-				Min: currentChunkFiles,  // Array of file keys
-				Max: currentChunkSize,   // Total size of files in this chunk
-			})
-			logger.Debugf("Created chunk with %d files (%d MB)", 
-				len(currentChunkFiles), currentChunkSize/(1024*1024))
-			currentChunkFiles = nil
-			currentChunkSize = 0
+			flushChunk()
 		}
 
 		// Add file to current chunk
@@ -209,14 +207,7 @@ func (s *S3) groupFilesIntoChunks(files []FileObject) *types.Set[types.Chunk] {
 	}
 
 	// Flush remaining files
-	if len(currentChunkFiles) > 0 {
-		chunks.Insert(types.Chunk{
-			Min: currentChunkFiles,  // Array of file keys
-			Max: currentChunkSize,   // Total size of files in this chunk
-		})
-		logger.Debugf("Created final chunk with %d files (%d MB)", 
-			len(currentChunkFiles), currentChunkSize/(1024*1024))
-	}
+	flushChunk()
 
 	return chunks
 }
@@ -229,50 +220,51 @@ func (s *S3) groupFilesIntoChunks(files []FileObject) *types.Set[types.Chunk] {
 // ChunkIterator reads and processes records from an S3 file or multiple files
 // Handles chunks as arrays (Min = []string): single file = array size 1, grouped files = array size > 1
 func (s *S3) ChunkIterator(ctx context.Context, stream types.StreamInterface, chunk types.Chunk, processFn abstract.BackfillMsgFn) error {
-	// Check if this is a typed array or interface array (from JSON state deserialization)
+	// Convert chunk.Min to []string, handling both []string and []interface{} (from state deserialization)
+	var fileKeys []string
+	
 	switch v := chunk.Min.(type) {
 	case []string:
-		// Chunk with file(s) - process each file sequentially
-		// Single large file: array size = 1
-		// Grouped small files: array size > 1
-		// TODO: Consider parallelizing file processing within chunks for better performance
-		// OR simplify by making each file its own chunk (remove grouping logic entirely)
-		logger.Infof("Processing chunk with %d file(s)", len(v))
-		for i, key := range v {
-			logger.Debugf("Processing file %d/%d in chunk: %s", i+1, len(v), key)
-			fileSize := s.getFileSize(stream.Name(), key)
-			if err := s.processFile(ctx, stream, key, fileSize, processFn); err != nil {
-				return fmt.Errorf("failed to process file %s in chunk: %w", key, err)
-			}
-		}
-		return nil
-
+		// Direct string array - most common case
+		fileKeys = v
+		
 	case []interface{}:
 		// Handle []interface{} from state deserialization after restart
 		// JSON unmarshaling converts []string to []interface{} when Min is type `any`
-		logger.Infof("Processing chunk with %d file(s) (from state)", len(v))
+		fileKeys = make([]string, len(v))
 		for i, item := range v {
 			key, ok := item.(string)
 			if !ok {
 				return fmt.Errorf("invalid file key type in chunk: expected string, got %T", item)
 			}
-			logger.Debugf("Processing file %d/%d in chunk: %s", i+1, len(v), key)
-			fileSize := s.getFileSize(stream.Name(), key)
-			if err := s.processFile(ctx, stream, key, fileSize, processFn); err != nil {
-				return fmt.Errorf("failed to process file %s in chunk: %w", key, err)
-			}
+			fileKeys[i] = key
 		}
-		return nil
-
+		
 	default:
 		return fmt.Errorf("invalid chunk Min type: expected []string, got %T", chunk.Min)
 	}
+
+	// Process all files in the chunk
+	// Single large file: array size = 1
+	// Grouped small files: array size > 1
+	// TODO: Consider parallelizing file processing within chunks for better performance
+	logger.Infof("Processing chunk with %d file(s)", len(fileKeys))
+	
+	for i, key := range fileKeys {
+		logger.Debugf("Processing file %d/%d in chunk: %s", i+1, len(fileKeys), key)
+		fileSize := s.getFileSize(stream.Name(), key)
+		if err := s.processFile(ctx, stream, key, fileSize, processFn); err != nil {
+			return fmt.Errorf("failed to process file %s in chunk: %w", key, err)
+		}
+	}
+	
+	return nil
 }
 
 // processFile handles the processing of a single S3 file using the parser package
 func (s *S3) processFile(ctx context.Context, stream types.StreamInterface, key string, fileSize int64, processFn abstract.BackfillMsgFn) error {
-	// Get reader for the file (S3-specific: handles S3 API, decompression, range requests)
-	reader, err := s.getStreamReader(ctx, key, fileSize)
+	// Get reader for the file (S3-specific: handles S3 API, decompression)
+	reader, _, err := s.getFileReader(ctx, key)
 	if err != nil {
 		// Check if file was deleted between discovery and processing
 		if strings.Contains(err.Error(), "NoSuchKey") || strings.Contains(err.Error(), "NotFound") {
@@ -327,27 +319,6 @@ func (s *S3) processFile(ctx context.Context, stream types.StreamInterface, key 
 	}
 
 	return nil
-}
-
-// getStreamReader returns a reader for streaming file data (S3-specific logic)
-func (s *S3) getStreamReader(ctx context.Context, key string, fileSize int64) (io.Reader, error) {
-	// Get the object from S3
-	result, err := s.client.GetObject(ctx, &s3.GetObjectInput{
-		Bucket: aws.String(s.config.BucketName),
-		Key:    aws.String(key),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to get object from S3: %w", err)
-	}
-
-	// Apply decompression if needed (auto-detect from file extension)
-	reader, err := s.getReader(result.Body, key)
-	if err != nil {
-		result.Body.Close()
-		return nil, fmt.Errorf("failed to create decompressed reader: %w", err)
-	}
-
-	return reader, nil
 }
 
 // processParquetFileStreamingWithParser uses S3 range requests with the parser package
