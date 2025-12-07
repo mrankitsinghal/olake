@@ -33,8 +33,12 @@ func (p *JSONParser) InferSchema(ctx context.Context, reader io.Reader) (*types.
 	// Collect sample records using smart JSON format detection
 	maxSamples := 100
 
-	// Read content for format detection (limited to maxSamples)
-	data, err := io.ReadAll(reader)
+	// Limit data read for schema inference to prevent OOM on large files
+	// 10MB should be enough to get 100 sample records for most JSON files
+	const maxBytesForInference = 10 * 1024 * 1024 // 10MB
+	limitedReader := io.LimitReader(reader, maxBytesForInference)
+	
+	data, err := io.ReadAll(limitedReader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read JSON file: %w", err)
 	}
@@ -73,7 +77,7 @@ func (p *JSONParser) InferSchema(ctx context.Context, reader io.Reader) (*types.
 }
 
 // StreamRecords reads and streams JSON records with context support
-func (p *JSONParser) StreamRecords(ctx context.Context, reader io.Reader, batchSize int, callback RecordCallback) error {
+func (p *JSONParser) StreamRecords(ctx context.Context, reader io.Reader, callback RecordCallback) error {
 	recordCount := 0
 
 	if p.config.LineDelimited {
@@ -164,19 +168,39 @@ func (p *JSONParser) parseJSONContent(data []byte, maxSamples int) ([]map[string
 }
 
 // parseJSONArray handles JSON array format: [{"key":"value"}, ...]
+// Uses streaming decoder to avoid loading entire array into memory
 func (p *JSONParser) parseJSONArray(data []byte, maxSamples int) ([]map[string]interface{}, error) {
 	logger.Debug("Parsing JSON array format")
 
-	var records []map[string]interface{}
-	if err := json.Unmarshal(data, &records); err != nil {
-		return nil, fmt.Errorf("failed to decode JSON array: %w", err)
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	
+	// Read opening bracket
+	token, err := decoder.Token()
+	if err != nil {
+		return nil, fmt.Errorf("failed to read JSON array start: %w", err)
+	}
+	
+	// Verify it's an array
+	if delim, ok := token.(json.Delim); !ok || delim != '[' {
+		return nil, fmt.Errorf("expected JSON array, got: %v", token)
+	}
+	
+	// Stream elements one by one (up to maxSamples)
+	records := make([]map[string]interface{}, 0, maxSamples)
+	for decoder.More() && len(records) < maxSamples {
+		var record map[string]interface{}
+		if err := decoder.Decode(&record); err != nil {
+			// If we have some records, that's enough for schema inference
+			if len(records) > 0 {
+				logger.Warnf("Stopped reading JSON array after %d records due to error: %v", len(records), err)
+				break
+			}
+			return nil, fmt.Errorf("failed to decode JSON array element: %w", err)
+		}
+		records = append(records, record)
 	}
 
-	logger.Infof("Parsed JSON array with %d records", len(records))
-
-	if len(records) > maxSamples {
-		return records[:maxSamples], nil
-	}
+	logger.Infof("Parsed %d records from JSON array for schema inference", len(records))
 	return records, nil
 }
 

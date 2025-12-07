@@ -14,9 +14,10 @@ type Parser interface {
 	// Should not load entire file into memory
 	InferSchema(ctx context.Context, reader io.Reader) (*types.Stream, error)
 
-	// StreamRecords reads records from the reader and calls callback for each batch
-	// Supports batching and context cancellation to prevent OOM
-	StreamRecords(ctx context.Context, reader io.Reader, batchSize int, callback RecordCallback) error
+	// StreamRecords reads records from the reader and calls callback for each record
+	// Supports context cancellation to prevent resource leaks
+	// Batching is handled by the destination layer, not the parser
+	StreamRecords(ctx context.Context, reader io.Reader, callback RecordCallback) error
 }
 
 // RecordCallback is called for each record during streaming

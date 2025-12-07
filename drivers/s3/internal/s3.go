@@ -86,12 +86,6 @@ func (s *S3) Setup(ctx context.Context) error {
 	}
 
 	// Load configuration
-	if s.config.Endpoint != "" {
-		logger.Infof("Connecting to S3-compatible endpoint: %s", s.config.Endpoint)
-	} else {
-		logger.Infof("Connecting to AWS S3 in region: %s", s.config.Region)
-	}
-
 	cfg, err = config.LoadDefaultConfig(ctx, configOpts...)
 
 	if err != nil {
@@ -100,11 +94,13 @@ func (s *S3) Setup(ctx context.Context) error {
 
 	// Create S3 client
 	if s.config.Endpoint != "" {
+		logger.Infof("Connecting to S3-compatible endpoint: %s", s.config.Endpoint)
 		s.client = s3.NewFromConfig(cfg, func(o *s3.Options) {
 			o.BaseEndpoint = aws.String(s.config.Endpoint)
 			o.UsePathStyle = true // Required for MinIO and some S3-compatible services
 		})
 	} else {
+		logger.Infof("Connecting to AWS S3 in region: %s", s.config.Region)
 		s.client = s3.NewFromConfig(cfg)
 	}
 
@@ -363,10 +359,7 @@ func (s *S3) ProduceSchema(ctx context.Context, streamName string) (*types.Strea
 		}()
 		
 		// Create a wrapper that implements both io.ReaderAt and provides size info
-		wrapper := &parquetReaderWrapper{
-			readerAt: parquetReader,
-			size:     parquetSize,
-		}
+		wrapper := parser.NewParquetReaderWrapper(parquetReader, parquetSize)
 		
 		parquetParser := parser.NewParquetParser(*s.config.GetParquetConfig(), stream)
 		inferredStream, err = parquetParser.InferSchema(ctx, wrapper)
@@ -463,46 +456,6 @@ func (s *S3) getParquetReaderAt(ctx context.Context, key string, fileSize int64)
 	}
 
 	return bytes.NewReader(data), int64(len(data)), nil
-}
-
-// parquetReaderWrapper wraps an io.ReaderAt with size info and implements io.Seeker
-// This allows the Parquet parser to determine file size via Seek
-type parquetReaderWrapper struct {
-	readerAt io.ReaderAt
-	size     int64
-	offset   int64
-}
-
-func (w *parquetReaderWrapper) ReadAt(p []byte, off int64) (n int, err error) {
-	return w.readerAt.ReadAt(p, off)
-}
-
-func (w *parquetReaderWrapper) Seek(offset int64, whence int) (int64, error) {
-	switch whence {
-	case io.SeekStart:
-		w.offset = offset
-	case io.SeekCurrent:
-		w.offset += offset
-	case io.SeekEnd:
-		w.offset = w.size + offset
-	default:
-		return 0, fmt.Errorf("invalid whence: %d", whence)
-	}
-
-	if w.offset < 0 {
-		w.offset = 0
-	}
-	if w.offset > w.size {
-		w.offset = w.size
-	}
-
-	return w.offset, nil
-}
-
-func (w *parquetReaderWrapper) Read(p []byte) (n int, err error) {
-	n, err = w.readerAt.ReadAt(p, w.offset)
-	w.offset += int64(n)
-	return n, err
 }
 
 // getReader returns an appropriate reader based on file extension (S3 method wrapper)

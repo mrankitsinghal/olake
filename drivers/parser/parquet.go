@@ -31,27 +31,10 @@ func NewParquetParser(config ParquetConfig, stream *types.Stream) *ParquetParser
 func (p *ParquetParser) InferSchema(ctx context.Context, reader io.Reader) (*types.Stream, error) {
 	logger.Debug("Inferring Parquet schema from file metadata")
 
-	// Parquet requires io.ReaderAt interface
-	readerAt, ok := reader.(io.ReaderAt)
-	if !ok {
-		return nil, fmt.Errorf("Parquet parser requires io.ReaderAt, got %T", reader)
-	}
-
-	// Determine file size (needed for OpenFile)
-	var fileSize int64
-	if seeker, ok := reader.(io.Seeker); ok {
-		size, err := seeker.Seek(0, io.SeekEnd)
-		if err != nil {
-			return nil, fmt.Errorf("failed to determine file size: %w", err)
-		}
-		// Seek back to beginning
-		_, err = seeker.Seek(0, io.SeekStart)
-		if err != nil {
-			return nil, fmt.Errorf("failed to seek to start: %w", err)
-		}
-		fileSize = size
-	} else {
-		return nil, fmt.Errorf("Parquet parser requires io.Seeker to determine file size")
+	// Prepare reader and get file size
+	readerAt, fileSize, err := prepareParquetReader(reader)
+	if err != nil {
+		return nil, err
 	}
 
 	// Open Parquet file to read schema
@@ -76,28 +59,11 @@ func (p *ParquetParser) InferSchema(ctx context.Context, reader io.Reader) (*typ
 
 // StreamRecords reads and streams Parquet records with context support
 // NOTE: reader must be io.ReaderAt for Parquet (use S3RangeReader or bytes.Reader)
-func (p *ParquetParser) StreamRecords(ctx context.Context, reader io.Reader, batchSize int, callback RecordCallback) error {
-	// Parquet requires io.ReaderAt interface
-	readerAt, ok := reader.(io.ReaderAt)
-	if !ok {
-		return fmt.Errorf("Parquet parser requires io.ReaderAt, got %T", reader)
-	}
-
-	// Determine file size
-	var fileSize int64
-	if seeker, ok := reader.(io.Seeker); ok {
-		size, err := seeker.Seek(0, io.SeekEnd)
-		if err != nil {
-			return fmt.Errorf("failed to determine file size: %w", err)
-		}
-		// Seek back to beginning
-		_, err = seeker.Seek(0, io.SeekStart)
-		if err != nil {
-			return fmt.Errorf("failed to seek to start: %w", err)
-		}
-		fileSize = size
-	} else {
-		return fmt.Errorf("Parquet parser requires io.Seeker to determine file size")
+func (p *ParquetParser) StreamRecords(ctx context.Context, reader io.Reader, callback RecordCallback) error {
+	// Prepare reader and get file size
+	readerAt, fileSize, err := prepareParquetReader(reader)
+	if err != nil {
+		return err
 	}
 
 	// Open Parquet file
@@ -291,7 +257,7 @@ func parquetValueToInterface(val pq.Value) interface{} {
 	}
 
 	switch {
-	case val.Boolean() != false || val.Kind() == pq.Boolean:
+	case val.Boolean() || val.Kind() == pq.Boolean:
 		return val.Boolean()
 	case val.Int32() != 0 || val.Kind() == pq.Int32:
 		return int64(val.Int32())
@@ -307,5 +273,84 @@ func parquetValueToInterface(val pq.Value) interface{} {
 		// Fallback to string representation
 		return val.String()
 	}
+}
+
+// prepareParquetReader validates and prepares a reader for Parquet file operations
+// Returns the io.ReaderAt interface and file size needed for parquet-go
+func prepareParquetReader(reader io.Reader) (io.ReaderAt, int64, error) {
+	// Parquet requires io.ReaderAt interface
+	readerAt, ok := reader.(io.ReaderAt)
+	if !ok {
+		return nil, 0, fmt.Errorf("parquet parser requires io.ReaderAt, got %T", reader)
+	}
+
+	// Determine file size (needed for OpenFile)
+	var fileSize int64
+	if seeker, ok := reader.(io.Seeker); ok {
+		size, err := seeker.Seek(0, io.SeekEnd)
+		if err != nil {
+			return nil, 0, fmt.Errorf("failed to determine file size: %w", err)
+		}
+		// Seek back to beginning
+		_, err = seeker.Seek(0, io.SeekStart)
+		if err != nil {
+			return nil, 0, fmt.Errorf("failed to seek to start: %w", err)
+		}
+		fileSize = size
+	} else {
+		return nil, 0, fmt.Errorf("parquet parser requires io.Seeker to determine file size")
+	}
+
+	return readerAt, fileSize, nil
+}
+
+// ParquetReaderWrapper wraps an io.ReaderAt with size info and implements io.Seeker
+// This allows the Parquet parser to determine file size via Seek
+// Used when reading from sources like S3 that provide ReaderAt but not Seeker
+type ParquetReaderWrapper struct {
+	readerAt io.ReaderAt
+	size     int64
+	offset   int64
+}
+
+// NewParquetReaderWrapper creates a new wrapper for io.ReaderAt that also implements io.Seeker
+func NewParquetReaderWrapper(readerAt io.ReaderAt, size int64) *ParquetReaderWrapper {
+	return &ParquetReaderWrapper{
+		readerAt: readerAt,
+		size:     size,
+		offset:   0,
+	}
+}
+
+func (w *ParquetReaderWrapper) ReadAt(p []byte, off int64) (n int, err error) {
+	return w.readerAt.ReadAt(p, off)
+}
+
+func (w *ParquetReaderWrapper) Seek(offset int64, whence int) (int64, error) {
+	switch whence {
+	case io.SeekStart:
+		w.offset = offset
+	case io.SeekCurrent:
+		w.offset += offset
+	case io.SeekEnd:
+		w.offset = w.size + offset
+	default:
+		return 0, fmt.Errorf("invalid whence: %d", whence)
+	}
+
+	if w.offset < 0 {
+		w.offset = 0
+	}
+	if w.offset > w.size {
+		w.offset = w.size
+	}
+
+	return w.offset, nil
+}
+
+func (w *ParquetReaderWrapper) Read(p []byte) (n int, err error) {
+	n, err = w.readerAt.ReadAt(p, w.offset)
+	w.offset += int64(n)
+	return n, err
 }
 

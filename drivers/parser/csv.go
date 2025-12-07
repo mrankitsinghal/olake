@@ -91,8 +91,8 @@ func (p *CSVParser) InferSchema(ctx context.Context, reader io.Reader) (*types.S
 	return p.stream, nil
 }
 
-// StreamRecords reads and streams CSV records with batching and context support
-func (p *CSVParser) StreamRecords(ctx context.Context, reader io.Reader, batchSize int, callback RecordCallback) error {
+// StreamRecords reads and streams CSV records with context support
+func (p *CSVParser) StreamRecords(ctx context.Context, reader io.Reader, callback RecordCallback) error {
 	csvReader := csv.NewReader(reader)
 	csvReader.Comma = rune(p.config.Delimiter[0])
 	if p.config.QuoteCharacter != "" {
@@ -128,8 +128,14 @@ func (p *CSVParser) StreamRecords(ctx context.Context, reader io.Reader, batchSi
 		record := make(map[string]any)
 		for i, value := range firstRow {
 			if i < len(headers) {
-				fieldType, _ := p.stream.Schema.GetType(headers[i])
-				convertedValue := convertValue(value, fieldType)
+				fieldType, err := p.stream.Schema.GetType(headers[i])
+				if err != nil {
+					return fmt.Errorf("failed to get type for field %s: %w", headers[i], err)
+				}
+				convertedValue, err := convertValue(value, fieldType)
+				if err != nil {
+					return fmt.Errorf("failed to convert value for field %s: %w", headers[i], err)
+				}
 				record[headers[i]] = convertedValue
 			}
 		}
@@ -161,8 +167,14 @@ func (p *CSVParser) StreamRecords(ctx context.Context, reader io.Reader, batchSi
 		for i, value := range row {
 			if i < len(headers) {
 				// Convert value based on schema type
-				fieldType, _ := p.stream.Schema.GetType(headers[i])
-				convertedValue := convertValue(value, fieldType)
+				fieldType, err := p.stream.Schema.GetType(headers[i])
+				if err != nil {
+					return fmt.Errorf("failed to get type for field %s: %w", headers[i], err)
+				}
+				convertedValue, err := convertValue(value, fieldType)
+				if err != nil {
+					return fmt.Errorf("failed to convert value for field %s in row %d: %w", headers[i], recordCount, err)
+				}
 				record[headers[i]] = convertedValue
 			}
 		}
@@ -223,31 +235,37 @@ func inferColumnType(sampleRows [][]string, columnIndex int) types.DataType {
 }
 
 // convertValue converts a string value to the appropriate type based on schema
-func convertValue(value string, fieldType types.DataType) interface{} {
+func convertValue(value string, fieldType types.DataType) (interface{}, error) {
 	trimmed := strings.TrimSpace(value)
 
 	// Handle null/empty values
 	if trimmed == "" || strings.ToLower(trimmed) == "null" {
-		return nil
+		return nil, nil
 	}
 
 	// Convert based on field type
 	switch fieldType {
 	case types.Int32, types.Int64:
-		if intVal, err := strconv.ParseInt(trimmed, 10, 64); err == nil {
-			return intVal
+		intVal, err := strconv.ParseInt(trimmed, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert '%s' to integer: %w", trimmed, err)
 		}
+		return intVal, nil
 	case types.Float32, types.Float64:
-		if floatVal, err := strconv.ParseFloat(trimmed, 64); err == nil {
-			return floatVal
+		floatVal, err := strconv.ParseFloat(trimmed, 64)
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert '%s' to float: %w", trimmed, err)
 		}
+		return floatVal, nil
 	case types.Bool:
-		if boolVal, err := strconv.ParseBool(trimmed); err == nil {
-			return boolVal
+		boolVal, err := strconv.ParseBool(trimmed)
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert '%s' to boolean: %w", trimmed, err)
 		}
+		return boolVal, nil
 	}
 
 	// Default to string
-	return trimmed
+	return trimmed, nil
 }
 
