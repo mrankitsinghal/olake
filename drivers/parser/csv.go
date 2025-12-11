@@ -195,9 +195,10 @@ func inferColumnType(sampleRows [][]string, columnIndex int) types.DataType {
 		return types.String
 	}
 
-	hasInt := false
-	hasFloat := false
-	hasBool := false
+	allInt := true
+	allFloat := true
+	allBool := true
+	nonNullCount := 0
 
 	for _, row := range sampleRows {
 		if columnIndex >= len(row) {
@@ -209,25 +210,39 @@ func inferColumnType(sampleRows [][]string, columnIndex int) types.DataType {
 			continue
 		}
 
-		// Try to parse as different types
-		if _, err := strconv.ParseInt(value, 10, 64); err == nil {
-			hasInt = true
-		} else if _, err := strconv.ParseFloat(value, 64); err == nil {
-			hasFloat = true
-		} else if strings.ToLower(value) == "true" || strings.ToLower(value) == "false" {
-			hasBool = true
+		nonNullCount++
+
+		// Check if this value can be parsed as each type
+		// If any value fails to parse, that type is ruled out
+		if _, err := strconv.ParseInt(value, 10, 64); err != nil {
+			allInt = false
+		}
+
+		if _, err := strconv.ParseFloat(value, 64); err != nil {
+			allFloat = false
+		}
+
+		lowerValue := strings.ToLower(value)
+		if lowerValue != "true" && lowerValue != "false" {
+			allBool = false
 		}
 	}
 
-	// Determine type based on what we found
-	if hasBool && !hasInt && !hasFloat {
+	// If no non-null values found, default to string
+	if nonNullCount == 0 {
+		return types.String
+	}
+
+	// Determine type based on what ALL values can be parsed as
+	// Priority: Bool > Int > Float > String
+	if allBool {
 		return types.Bool
 	}
-	if hasFloat {
-		return types.Float64
-	}
-	if hasInt {
+	if allInt {
 		return types.Int64
+	}
+	if allFloat {
+		return types.Float64
 	}
 
 	// Default to string

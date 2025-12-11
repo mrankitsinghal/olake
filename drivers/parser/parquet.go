@@ -256,21 +256,26 @@ func parquetValueToInterface(val pq.Value) interface{} {
 		return nil
 	}
 
-	switch {
-	case val.Boolean() || val.Kind() == pq.Boolean:
+	// Check Kind() first to correctly identify the type before extracting value
+	switch val.Kind() {
+	case pq.Boolean:
 		return val.Boolean()
-	case val.Int32() != 0 || val.Kind() == pq.Int32:
+	case pq.Int32:
 		return int64(val.Int32())
-	case val.Int64() != 0 || val.Kind() == pq.Int64:
+	case pq.Int64:
 		return val.Int64()
-	case val.Float() != 0 || val.Kind() == pq.Float:
+	case pq.Float:
 		return float64(val.Float())
-	case val.Double() != 0 || val.Kind() == pq.Double:
+	case pq.Double:
 		return val.Double()
-	case val.ByteArray() != nil || val.Kind() == pq.ByteArray:
+	case pq.ByteArray, pq.FixedLenByteArray:
 		return string(val.ByteArray())
+	case pq.Int96:
+		// Int96 is typically used for timestamps in legacy Parquet files
+		return val.String()
 	default:
-		// Fallback to string representation
+		// For Group types (nested structures, maps, lists) and unknown types,
+		// use the string representation which serializes the nested structure
 		return val.String()
 	}
 }

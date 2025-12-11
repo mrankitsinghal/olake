@@ -389,35 +389,6 @@ func TestParquetConfigEdgeCases(t *testing.T) {
 	}
 }
 
-// TestBatchSizeEdgeCases tests batch size validation
-func TestBatchSizeEdgeCases(t *testing.T) {
-	tests := []struct {
-		name      string
-		batchSize int
-		expected  int // after validation
-	}{
-		{"default batch size", 0, 10000},
-		{"custom small batch", 100, 100},
-		{"custom large batch", 100000, 100000},
-		{"batch size 1", 1, 1},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			config := Config{
-				BucketName: "test-bucket",
-				Region:     "us-east-1",
-				FileFormat: FormatCSV,
-				BatchSize:  tt.batchSize,
-			}
-
-			err := config.Validate()
-			assert.NoError(t, err)
-			assert.Equal(t, tt.expected, config.BatchSize)
-		})
-	}
-}
-
 // TestThreadCountEdgeCases tests thread count validation
 func TestThreadCountEdgeCases(t *testing.T) {
 	tests := []struct {

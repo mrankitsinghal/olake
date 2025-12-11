@@ -267,52 +267,85 @@ func inferJSONFieldType(values []interface{}) types.DataType {
 		return types.String
 	}
 
-	hasInt := false
-	hasFloat := false
-	hasBool := false
-	hasString := false
-	hasObject := false
-	hasArray := false
+	allInt := true
+	allFloat := true
+	allBool := true
+	allObject := true
+	allArray := true
+	nonNullCount := 0
 
 	for _, value := range values {
 		if value == nil {
 			continue
 		}
 
+		nonNullCount++
+
+		// Check each value against all possible types
+		// If any value doesn't match a type, that type is ruled out
 		switch v := value.(type) {
 		case bool:
-			hasBool = true
+			allInt = false
+			allFloat = false
+			allObject = false
+			allArray = false
 		case float64:
 			// JSON numbers are always float64
-			if v == float64(int64(v)) {
-				hasInt = true
-			} else {
-				hasFloat = true
+			// Check if it's actually an integer
+			if v != float64(int64(v)) {
+				allInt = false
 			}
+			allBool = false
+			allObject = false
+			allArray = false
 		case string:
-			hasString = true
+			allInt = false
+			allFloat = false
+			allBool = false
+			allObject = false
+			allArray = false
 		case map[string]interface{}:
-			hasObject = true
+			allInt = false
+			allFloat = false
+			allBool = false
+			allArray = false
 		case []interface{}:
-			hasArray = true
+			allInt = false
+			allFloat = false
+			allBool = false
+			allObject = false
+		default:
+			// Unknown type, default to string
+			allInt = false
+			allFloat = false
+			allBool = false
+			allObject = false
+			allArray = false
 		}
 	}
 
-	// Determine type based on what we found
-	if hasBool && !hasInt && !hasFloat && !hasString && !hasObject && !hasArray {
+	// If no non-null values found, default to string
+	if nonNullCount == 0 {
+		return types.String
+	}
+
+	// Determine type based on what ALL values can be
+	// Priority: Bool > Int > Float > Object/Array > String
+	if allBool {
 		return types.Bool
 	}
-	if hasFloat {
-		return types.Float64
-	}
-	if hasInt && !hasFloat {
+	if allInt {
 		return types.Int64
 	}
-	if hasObject || hasArray {
+	if allFloat {
+		return types.Float64
+	}
+	if allObject || allArray {
 		return types.String // Complex types should be stored as JSON string
 	}
 
 	// Default to string
 	return types.String
 }
+
 

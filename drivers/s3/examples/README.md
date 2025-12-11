@@ -160,7 +160,7 @@ cd drivers/s3/examples
 - ✅ Compression handling (gzip, snappy)
 - ✅ Chunking logic (2GB chunks)
 - ✅ Schema inference
-- ✅ Incremental sync with `_olake_last_modified`
+- ✅ Incremental sync with `_last_modified_time`
 - ✅ Data integrity in Iceberg
 
 ---
@@ -373,9 +373,9 @@ SELECT COUNT(*) FROM json_users;
 SELECT COUNT(*) FROM json_orders;
 
 # Check cursor field
-SELECT _olake_last_modified, COUNT(*) 
+SELECT _last_modified_time, COUNT(*) 
 FROM parquet_users 
-GROUP BY _olake_last_modified;
+GROUP BY _last_modified_time;
 
 # Sample data
 SELECT * FROM parquet_users LIMIT 5;
@@ -677,7 +677,7 @@ After running all tests, you should see:
 - ✅ **All formats:** Parquet, CSV, JSON working
 - ✅ **All compressions:** Gzip, Snappy, None working
 - ✅ **Iceberg tables:** Created with correct schemas
-- ✅ **Cursor field:** `_olake_last_modified` present
+- ✅ **Cursor field:** `_last_modified_time` present
 - ✅ **No errors:** Clean logs, no panics
 
 ---

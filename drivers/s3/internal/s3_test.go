@@ -187,7 +187,6 @@ func TestConfigValidation(t *testing.T) {
 				assert.True(t, tt.config.StreamGroupingEnabled)
 				assert.Equal(t, 1, tt.config.StreamGroupingLevel)
 				assert.NotZero(t, tt.config.MaxThreads)
-				assert.NotZero(t, tt.config.BatchSize)
 			}
 		})
 	}

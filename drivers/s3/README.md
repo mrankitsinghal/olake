@@ -258,7 +258,7 @@ drivers/s3/
 **Stream-Level State**: The driver implements `StateType()` returning `types.StreamType` for proper framework integration.
 
 **Cursor Tracking**:
-- **Cursor Field**: `LastModified` (S3 timestamp)
+- **Cursor Field**: `_last_modified_time` (S3 timestamp)
 - **Granularity**: Per-stream (folder)
 - **Storage**: JSON state file with stream cursors
 - **Behavior**: Only sync files modified since last run
@@ -267,10 +267,10 @@ drivers/s3/
 ```json
 {
   "users": {
-    "LastModified": "2024-01-15T10:30:00Z"
+    "_last_modified_time": "2024-01-15T10:30:00Z"
   },
   "orders": {
-    "LastModified": "2024-01-15T11:45:00Z"
+    "_last_modified_time": "2024-01-15T11:45:00Z"
   }
 }
 ```
@@ -285,7 +285,7 @@ Configure in `streams.json`:
 {
   "stream": "users",
   "sync_mode": "incremental",
-  "cursor_field": "LastModified"
+  "cursor_field": "_last_modified_time"
 }
 ```
 
@@ -362,7 +362,7 @@ docker compose down && docker compose up -d
 **Incremental Sync Not Working**:
 - Verify `state.json` file is being persisted
 - Check `sync_mode: "incremental"` in catalog
-- Ensure `cursor_field: "LastModified"` is set
+- Ensure `cursor_field: "_last_modified_time"` is set
 - Check state file permissions (must be writable)
 
 **Out of Memory**:

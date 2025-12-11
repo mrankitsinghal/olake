@@ -41,9 +41,8 @@ type Config struct {
 	Compression CompressionType `json:"compression"`
 
 	// ===== Performance & Filtering Configuration =====
-	MaxThreads int    `json:"max_threads"` // Number of concurrent file processors
-	BatchSize  int    `json:"batch_size"`  // Number of records to batch before sending
-	RetryCount int    `json:"retry_count"` // Number of retries for failed operations
+	MaxThreads  int    `json:"max_threads"`  // Number of concurrent file processors
+	RetryCount  int    `json:"retry_count"`  // Number of retries for failed operations
 	FilePattern string `json:"file_pattern"` // Regex pattern to filter files (optional)
 
 	// ===== Stream Grouping Configuration =====
@@ -131,11 +130,6 @@ func (c *Config) Validate() error {
 		c.Parquet = &parser.ParquetConfig{
 			StreamingEnabled: true,
 		}
-	}
-
-	// Set default batch size
-	if c.BatchSize <= 0 {
-		c.BatchSize = 10000
 	}
 
 	// Set default thread count

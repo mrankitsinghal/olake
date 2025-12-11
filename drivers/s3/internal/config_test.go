@@ -174,7 +174,6 @@ func TestConfigDefaults(t *testing.T) {
 	assert.Equal(t, ",", config.CSV.Delimiter, "default CSV delimiter should be ','")
 	assert.Equal(t, "\"", config.CSV.QuoteCharacter, "default quote character should be '\"'")
 	assert.Equal(t, true, config.CSV.HasHeader, "default has_header should be true")
-	assert.Equal(t, 10000, config.BatchSize, "default batch size should be 10000")
 	assert.Equal(t, constants.DefaultThreadCount, config.MaxThreads, "default max threads should match constant")
 	assert.Equal(t, constants.DefaultRetryCount, config.RetryCount, "default retry count should match constant")
 }

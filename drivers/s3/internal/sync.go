@@ -41,6 +41,13 @@ func (s *S3) getCursorFromState(stream types.StreamInterface) string {
 		return ""
 	}
 
+	// Check if backfill has been completed
+	// In incremental mode, we must complete a full load first before filtering by cursor
+	if !s.state.HasCompletedBackfill(configuredStream) {
+		logger.Infof("Stream %s backfill not completed yet, using backfill mode (cursor: epoch)", stream.Name())
+		return ""
+	}
+
 	// Get cursor value from state
 	cursorValue := s.state.GetCursor(configuredStream, primaryCursor)
 	if cursorValue == nil {
@@ -279,8 +286,14 @@ func (s *S3) processFile(ctx context.Context, stream types.StreamInterface, key 
 		}
 	}()
 
+	// Get LastModified timestamp for this file to add to each record
+	lastModified := s.getFileLastModified(stream.Name(), key)
+
 	// Create callback adapter from abstract.BackfillMsgFn to parser.RecordCallback
+	// Add _last_modified_time field to each record for incremental sync tracking
 	callback := func(ctx context.Context, record map[string]any) error {
+		// Inject LastModified timestamp into each record
+		record[lastModifiedField] = lastModified
 		return processFn(ctx, record)
 	}
 
@@ -332,8 +345,13 @@ func (s *S3) processParquetFileStreamingWithParser(ctx context.Context, stream t
 	// Wrap reader to make it compatible with parser requirements
 	wrapper := parser.NewParquetReaderWrapper(rangeReader, fileSize)
 
-	// Create callback adapter
+	// Get LastModified timestamp for this file to add to each record
+	lastModified := s.getFileLastModified(stream.Name(), key)
+
+	// Create callback adapter - add _last_modified_time field to each record
 	callback := func(ctx context.Context, record map[string]any) error {
+		// Inject LastModified timestamp into each record
+		record[lastModifiedField] = lastModified
 		return processFn(ctx, record)
 	}
 
@@ -366,6 +384,23 @@ func (s *S3) getFileSize(streamName, fileKey string) int64 {
 	return 0
 }
 
+// getFileLastModified retrieves the LastModified timestamp from discovered files
+// Returns empty string if file not found
+func (s *S3) getFileLastModified(streamName, fileKey string) string {
+	files, exists := s.discoveredFiles[streamName]
+	if !exists {
+		return ""
+	}
+
+	for _, file := range files {
+		if file.FileKey == fileKey {
+			return file.LastModified
+		}
+	}
+
+	return ""
+}
+
 // ============================================
 // SECTION 4: Incremental-Specific Methods
 // ============================================
@@ -396,23 +431,68 @@ func (s *S3) FetchMaxCursorValues(ctx context.Context, stream types.StreamInterf
 	return maxLastModified, nil, nil
 }
 
-// StreamIncrementalChanges is called by the abstract layer after backfill completes
-// For S3, all incremental work is already done by GetOrSplitChunks + Backfill via cursor filtering:
-//   1. GetOrSplitChunks filters files by cursor (empty for full-load, timestamp for incremental)
-//   2. Backfill processes chunks in parallel via connection groups
-//   3. This method becomes a no-op since all work is already complete
+// StreamIncrementalChanges processes files that were added/modified after backfill completed
+// This follows olake's incremental sync architecture:
+//   1. Backfill phase processes files up to the initial cursor
+//   2. This method processes files added/modified AFTER backfill (LastModified > cursor)
+//   3. Processes files sequentially (no chunking/parallelization for simplicity)
 func (s *S3) StreamIncrementalChanges(ctx context.Context, stream types.StreamInterface, cb abstract.BackfillMsgFn) error {
 	streamName := stream.Name()
 	
-	logger.Infof("Incremental sync already completed for stream %s via unified chunk processing", streamName)
+	// Get the cursor that was used during backfill
+	// This represents the timestamp of the last file processed during backfill
+	backfillCursor := s.getCursorFromState(stream)
 	
-	// All files have already been processed by the Backfill phase which:
-	// - Called GetOrSplitChunks (with cursor-based filtering)
-	// - Grouped files into optimized 2GB chunks
-	// - Processed chunks in parallel via abstract layer connection groups
-	//
-	// No additional work needed here - cursor filtering ensures only new/modified files
-	// were included in the chunks that were already processed.
+	if backfillCursor == "" {
+		// No cursor means this is a full refresh or first sync
+		// All files were already processed during backfill
+		logger.Infof("Stream %s: no cursor found, backfill handled all files", streamName)
+		return nil
+	}
+	
+	logger.Infof("Stream %s: processing incremental changes (files with LastModified > %s)", 
+		streamName, backfillCursor)
+	
+	// Get all discovered files for this stream
+	files, exists := s.discoveredFiles[streamName]
+	if !exists || len(files) == 0 {
+		logger.Infof("Stream %s: no files found for incremental processing", streamName)
+		return nil
+	}
+	
+	// Filter files to only include those modified AFTER the backfill cursor
+	// These are files added/modified while backfill was running or between discovery and now
+	incrementalFiles := s.filterFilesByCursor(files, backfillCursor)
+	
+	if len(incrementalFiles) == 0 {
+		logger.Infof("Stream %s: no new files to process (all files <= cursor)", streamName)
+		return nil
+	}
+	
+	logger.Infof("Stream %s: found %d file(s) for incremental processing", 
+		streamName, len(incrementalFiles))
+	
+	// Process each incremental file sequentially
+	// Note: We process one-by-one for simplicity. Parallelization can be added later if needed.
+	for i, file := range incrementalFiles {
+		logger.Infof("Stream %s: processing incremental file %d/%d: %s (LastModified: %s)", 
+			streamName, i+1, len(incrementalFiles), file.FileKey, file.LastModified)
+		
+		// Check context cancellation
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		
+		// Process the file using the same logic as backfill
+		if err := s.processFile(ctx, stream, file.FileKey, file.Size, cb); err != nil {
+			return fmt.Errorf("failed to process incremental file %s: %w", file.FileKey, err)
+		}
+	}
+	
+	logger.Infof("Stream %s: completed incremental processing of %d file(s)", 
+		streamName, len(incrementalFiles))
 	
 	return nil
 }

@@ -20,8 +20,8 @@ import (
 )
 
 const (
-	// olakeLastModifiedField is the field name used for tracking file modification timestamps for incremental sync
-	olakeLastModifiedField = "_olake_last_modified"
+	// lastModifiedField is the S3 metadata field name used for tracking file modification timestamps for incremental sync
+	lastModifiedField = "_last_modified_time"
 )
 
 // S3 represents the S3 source driver
@@ -329,9 +329,9 @@ func (s *S3) ProduceSchema(ctx context.Context, streamName string) (*types.Strea
 		return nil, fmt.Errorf("failed to infer schema: %w", err)
 	}
 
-	// Add _olake_last_modified as a cursor field for incremental sync
-	inferredStream.UpsertField(olakeLastModifiedField, types.String, false)
-	inferredStream.WithCursorField(olakeLastModifiedField)
+	// Add _last_modified_time as a cursor field for incremental sync
+	inferredStream.UpsertField(lastModifiedField, types.String, false)
+	inferredStream.WithCursorField(lastModifiedField)
 
 	return inferredStream, nil
 }
