@@ -14,7 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/datazip-inc/olake/drivers/abstract"
-	"github.com/datazip-inc/olake/drivers/parser"
+	"github.com/datazip-inc/olake/pkg/parser"
 	"github.com/datazip-inc/olake/types"
 	"github.com/datazip-inc/olake/utils/logger"
 )
@@ -226,20 +226,14 @@ func (s *S3) GetStreamNames(ctx context.Context) ([]string, error) {
 	}
 
 	logger.Infof("Discovered %d files in %d streams (after filtering)", totalFiles, len(streamNames))
-	if s.config.StreamGroupingEnabled {
-		logger.Infof("Stream grouping enabled at level %d", s.config.StreamGroupingLevel)
-	}
+	logger.Infof("Stream grouping enabled at level 1 (first folder after path_prefix)")
 
 	return streamNames, nil
 }
 
-// extractStreamName extracts the stream name from a file key based on grouping configuration
+// extractStreamName extracts the stream name from a file key
+// Stream grouping is always enabled at level 1 (first folder after path_prefix)
 func (s *S3) extractStreamName(key string) string {
-	if !s.config.StreamGroupingEnabled {
-		// No grouping - each file is its own stream
-		return key
-	}
-
 	// Remove path_prefix from the key to get relative path
 	relativePath := key
 	if s.config.PathPrefix != "" {
@@ -253,25 +247,16 @@ func (s *S3) extractStreamName(key string) string {
 		return key
 	}
 
-	// Split by / and take first N levels based on StreamGroupingLevel
+	// Split by / and extract first folder level
 	parts := strings.Split(relativePath, "/")
 	if len(parts) == 0 {
 		logger.Warnf("File %s produced no path parts, using full key", key)
 		return key
 	}
 
-	// If file is at or below grouping level, use the path up to that level
-	if len(parts) <= s.config.StreamGroupingLevel {
-		// If only one part (no folders), use the first part
-		if len(parts) == 1 {
-			return parts[0]
-		}
-		// Use all parts except the filename
-		return strings.Join(parts[:len(parts)-1], "/")
-	}
-
-	// Take the first N levels as stream name
-	return strings.Join(parts[:s.config.StreamGroupingLevel], "/")
+	// Return first folder level as stream name
+	// For files at root (no folders), use the filename itself
+	return parts[0]
 }
 
 // matchesFileFormat checks if a file key matches the configured file format
@@ -342,13 +327,13 @@ func (s *S3) withFileReader(ctx context.Context, fileKey string, callback func(i
 	reader, _, err := s.getFileReader(ctx, fileKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get file reader: %w", err)
-	}
-	defer func() {
-		if closer, ok := reader.(io.Closer); ok {
-			closer.Close()
 		}
-	}()
-
+		defer func() {
+			if closer, ok := reader.(io.Closer); ok {
+				closer.Close()
+			}
+		}()
+		
 	return callback(reader)
 }
 
@@ -358,14 +343,14 @@ func (s *S3) withParquetReader(ctx context.Context, fileKey string, fileSize int
 	parquetReader, parquetSize, err := s.getParquetReaderAt(ctx, fileKey, fileSize)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get Parquet reader: %w", err)
-	}
-	defer func() {
-		if closer, ok := parquetReader.(io.Closer); ok {
-			closer.Close()
 		}
-	}()
-
-	// Create a wrapper that implements both io.ReaderAt and provides size info
+		defer func() {
+			if closer, ok := parquetReader.(io.Closer); ok {
+				closer.Close()
+			}
+		}()
+		
+		// Create a wrapper that implements both io.ReaderAt and provides size info
 	wrapper := parser.NewParquetReaderWrapper(parquetReader, parquetSize)
 	return callback(wrapper)
 }

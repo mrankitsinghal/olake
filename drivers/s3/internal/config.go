@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	"github.com/datazip-inc/olake/constants"
-	"github.com/datazip-inc/olake/drivers/parser"
+	"github.com/datazip-inc/olake/pkg/parser"
 )
 
 // FileFormat represents the format of files in S3
@@ -46,9 +46,9 @@ type Config struct {
 	FilePattern string `json:"file_pattern"` // Regex pattern to filter files (optional)
 
 	// ===== Stream Grouping Configuration =====
-	StreamGroupingEnabled bool   `json:"stream_grouping_enabled"` // Default: true - groups files by folder
-	StreamGroupingLevel   int    `json:"stream_grouping_level"`   // Folder depth for grouping (default: 1)
-	StreamPattern         string `json:"stream_pattern"`          // Regex pattern for custom grouping (Phase 2)
+	// Stream grouping is always enabled at level 1 (first folder after path_prefix)
+	// StreamPattern for custom grouping can be added in Phase 2
+	StreamPattern string `json:"stream_pattern"` // Regex pattern for custom grouping (Phase 2)
 
 	// ===== Format-Specific Parser Configurations =====
 	CSV     *parser.CSVConfig     `json:"csv,omitempty"`
@@ -145,17 +145,6 @@ func (c *Config) Validate() error {
 	// Normalize path prefix (remove leading/trailing slashes)
 	if c.PathPrefix != "" {
 		c.PathPrefix = strings.Trim(c.PathPrefix, "/")
-	}
-
-	// Stream grouping defaults
-	// Default to enabled for folder-based stream grouping
-	if !c.StreamGroupingEnabled {
-		c.StreamGroupingEnabled = true
-	}
-
-	// Validate and set default grouping level
-	if c.StreamGroupingLevel <= 0 {
-		c.StreamGroupingLevel = 1
 	}
 
 	return nil

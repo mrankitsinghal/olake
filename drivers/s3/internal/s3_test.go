@@ -2,7 +2,6 @@ package driver
 
 import (
 	"context"
-	"sync"
 	"testing"
 
 	"github.com/datazip-inc/olake/types"
@@ -10,63 +9,43 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestExtractStreamName tests the folder grouping logic
+// TestExtractStreamName tests the folder grouping logic (always level 1)
 func TestExtractStreamName(t *testing.T) {
 	tests := []struct {
-		name                  string
-		pathPrefix            string
-		streamGroupingEnabled bool
-		streamGroupingLevel   int
-		fileKey               string
-		expectedStreamName    string
+		name               string
+		pathPrefix         string
+		fileKey            string
+		expectedStreamName string
 	}{
 		{
-			name:                  "grouping disabled - file is stream",
-			pathPrefix:            "",
-			streamGroupingEnabled: false,
-			streamGroupingLevel:   1,
-			fileKey:               "users/2024-01-01/data.csv",
-			expectedStreamName:    "users/2024-01-01/data.csv",
+			name:               "extract first folder - multiple levels",
+			pathPrefix:         "",
+			fileKey:            "users/2024-01-01/data.csv",
+			expectedStreamName: "users",
 		},
 		{
-			name:                  "grouping level 1 - extract first folder",
-			pathPrefix:            "",
-			streamGroupingEnabled: true,
-			streamGroupingLevel:   1,
-			fileKey:               "users/2024-01-01/data.csv",
-			expectedStreamName:    "users",
+			name:               "with path prefix - remove prefix and extract first folder",
+			pathPrefix:         "data/raw",
+			fileKey:            "data/raw/users/2024-01-01/data.csv",
+			expectedStreamName: "users",
 		},
 		{
-			name:                  "grouping level 2 - extract two folders",
-			pathPrefix:            "",
-			streamGroupingEnabled: true,
-			streamGroupingLevel:   2,
-			fileKey:               "users/2024-01-01/data.csv",
-			expectedStreamName:    "users/2024-01-01",
+			name:               "file at root level - no folders",
+			pathPrefix:         "",
+			fileKey:            "data.csv",
+			expectedStreamName: "data.csv",
 		},
 		{
-			name:                  "with path prefix - remove prefix",
-			pathPrefix:            "data/raw",
-			streamGroupingEnabled: true,
-			streamGroupingLevel:   1,
-			fileKey:               "data/raw/users/2024-01-01/data.csv",
-			expectedStreamName:    "users",
+			name:               "single folder level",
+			pathPrefix:         "",
+			fileKey:            "users/data.csv",
+			expectedStreamName: "users",
 		},
 		{
-			name:                  "file at root level",
-			pathPrefix:            "",
-			streamGroupingEnabled: true,
-			streamGroupingLevel:   1,
-			fileKey:               "data.csv",
-			expectedStreamName:    "data.csv",
-		},
-		{
-			name:                  "single folder level",
-			pathPrefix:            "",
-			streamGroupingEnabled: true,
-			streamGroupingLevel:   1,
-			fileKey:               "users/data.csv",
-			expectedStreamName:    "users",
+			name:               "deeply nested - only first folder",
+			pathPrefix:         "",
+			fileKey:            "orders/2024/01/15/file.csv",
+			expectedStreamName: "orders",
 		},
 	}
 
@@ -74,9 +53,7 @@ func TestExtractStreamName(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			s := &S3{
 				config: &Config{
-					PathPrefix:            tt.pathPrefix,
-					StreamGroupingEnabled: tt.streamGroupingEnabled,
-					StreamGroupingLevel:   tt.streamGroupingLevel,
+					PathPrefix: tt.pathPrefix,
 				},
 			}
 
@@ -178,16 +155,14 @@ func TestConfigValidation(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			err := tt.config.Validate()
 
-			if tt.expectError {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tt.errorMsg)
-			} else {
-				require.NoError(t, err)
-				// Check defaults are applied
-				assert.True(t, tt.config.StreamGroupingEnabled)
-				assert.Equal(t, 1, tt.config.StreamGroupingLevel)
-				assert.NotZero(t, tt.config.MaxThreads)
-			}
+		if tt.expectError {
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.errorMsg)
+		} else {
+			require.NoError(t, err)
+			// Check defaults are applied
+			assert.NotZero(t, tt.config.MaxThreads)
+		}
 		})
 	}
 }
@@ -375,48 +350,6 @@ func TestFilterFilesByCursor(t *testing.T) {
 			}
 		})
 	}
-}
-
-// TestGetCursorFromState tests cursor retrieval from state
-func TestGetCursorFromState(t *testing.T) {
-	tests := []struct {
-		name            string
-		setupStream     func(*types.State) types.StreamInterface
-		expectedCursor  string
-		description     string
-	}{
-		{
-			name: "configured stream with no cursor field - backfill mode",
-			setupStream: func(state *types.State) types.StreamInterface {
-				stream := types.NewStream("test_stream", "s3", nil)
-				return stream.Wrap(0)
-			},
-			expectedCursor: "",
-			description:    "configured stream without cursor returns empty cursor",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			state := &types.State{
-				RWMutex: &sync.RWMutex{},
-				Type:    types.StreamType,
-			}
-			s := &S3{
-				state: state,
-			}
-			
-			stream := tt.setupStream(state)
-			cursor := s.getCursorFromState(stream)
-			
-			assert.Equal(t, tt.expectedCursor, cursor, tt.description)
-		})
-	}
-}
-
-// TestUnifiedBackfillAndIncremental tests that both backfill and incremental use the same code path
-func TestUnifiedBackfillAndIncremental(t *testing.T) {
-	t.Skip("Skipping test - functionality covered by TestFilterFilesByCursor and TestGetCursorFromState")
 }
 
 

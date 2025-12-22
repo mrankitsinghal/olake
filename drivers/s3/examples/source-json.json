@@ -7,11 +7,10 @@
   "endpoint": "http://localhost:9000",
   "file_format": "json",
   "compression": "gzip",
-  "json_line_delimited": true,
-  "stream_grouping_enabled": true,
-  "stream_grouping_level": 1,
   "max_threads": 5,
-  "batch_size": 10000,
-  "retry_count": 3
+  "retry_count": 3,
+  "json": {
+    "line_delimited": true
+  }
 }
 

@@ -3,7 +3,7 @@ package driver
 import (
 	"testing"
 
-	"github.com/datazip-inc/olake/drivers/parser"
+	"github.com/datazip-inc/olake/pkg/parser"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -103,47 +103,41 @@ func TestCompressionTypeValidation(t *testing.T) {
 	}
 }
 
-// TestStreamGroupingEdgeCases tests edge cases in stream name extraction
+// TestStreamGroupingEdgeCases tests edge cases in stream name extraction (always level 1)
 func TestStreamGroupingEdgeCases(t *testing.T) {
 	tests := []struct {
 		name               string
 		pathPrefix         string
-		streamGroupingLevel int
 		fileKey            string
 		expectedStreamName string
 	}{
 		{
-			name:               "deeply nested path - level 3",
+			name:               "deeply nested path - extracts only first folder",
 			pathPrefix:         "",
-			streamGroupingLevel: 3,
 			fileKey:            "year/2024/month/01/day/15/data.csv",
-			expectedStreamName: "year/2024/month",
+			expectedStreamName: "year",
 		},
 		{
 			name:               "file in root - no folders",
 			pathPrefix:         "",
-			streamGroupingLevel: 1,
 			fileKey:            "data.csv",
 			expectedStreamName: "data.csv",
 		},
 		{
-			name:               "grouping level exceeds path depth",
+			name:               "single folder level",
 			pathPrefix:         "",
-			streamGroupingLevel: 5,
 			fileKey:            "users/data.csv",
 			expectedStreamName: "users",
 		},
 		{
 			name:               "path prefix with trailing slash",
 			pathPrefix:         "raw/",
-			streamGroupingLevel: 1,
 			fileKey:            "raw/users/data.csv",
 			expectedStreamName: "users",
 		},
 		{
 			name:               "empty file key",
 			pathPrefix:         "",
-			streamGroupingLevel: 1,
 			fileKey:            "",
 			expectedStreamName: "",
 		},
@@ -153,9 +147,7 @@ func TestStreamGroupingEdgeCases(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			s := &S3{
 				config: &Config{
-					PathPrefix:            tt.pathPrefix,
-					StreamGroupingEnabled: true,
-					StreamGroupingLevel:   tt.streamGroupingLevel,
+					PathPrefix: tt.pathPrefix,
 				},
 			}
 

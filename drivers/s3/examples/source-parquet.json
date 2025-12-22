@@ -7,10 +7,7 @@
   "endpoint": "http://localhost:9000",
   "file_format": "parquet",
   "compression": "none",
-  "stream_grouping_enabled": true,
-  "stream_grouping_level": 1,
   "max_threads": 5,
-  "batch_size": 10000,
   "retry_count": 3
 }
 
