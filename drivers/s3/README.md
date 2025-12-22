@@ -40,9 +40,10 @@ Production-ready S3 source connector for Olake that enables ingesting data from 
 |-------|------|---------|-------------|
 | `path_prefix` | string | `""` | S3 path prefix to filter files |
 | `endpoint` | string | AWS S3 | Custom S3 endpoint (MinIO/LocalStack) |
-| `folder_grouping_enabled` | boolean | `true` | Group files by folder into streams |
 | `max_threads` | integer | `10` | Number of concurrent file processors |
 | `retry_count` | integer | `3` | Number of retries for failed operations |
+
+**Note**: Stream grouping is always enabled at level 1 (first folder after path_prefix). This groups all files in the same top-level folder into one stream.
 
 ### CSV-Specific Options
 
@@ -138,7 +139,6 @@ cd drivers/s3/examples
   "access_key_id": "YOUR_ACCESS_KEY",
   "secret_access_key": "YOUR_SECRET_KEY",
   "file_format": "parquet",
-  "folder_grouping_enabled": true,
   "max_threads": 10
 }
 ```
@@ -165,9 +165,10 @@ data/
   "secret_access_key": "minioadmin",
   "endpoint": "http://localhost:9000",
   "file_format": "csv",
-  "has_header": true,
-  "delimiter": ",",
-  "folder_grouping_enabled": true
+  "csv": {
+    "has_header": true,
+    "delimiter": ","
+  }
 }
 ```
 
@@ -183,7 +184,6 @@ Handles both `.csv` and `.csv.gz` files automatically!
   "access_key_id": "YOUR_ACCESS_KEY",
   "secret_access_key": "YOUR_SECRET_KEY",
   "file_format": "json",
-  "folder_grouping_enabled": true,
   "max_threads": 5
 }
 ```
@@ -197,11 +197,15 @@ drivers/s3/
 ├── internal/                    # Core implementation
 │   ├── s3.go                   # Main driver (discovery, setup)
 │   ├── config.go               # Configuration validation
-│   ├── parsers.go              # Schema inference (CSV/JSON/Parquet)
-│   ├── backfill.go             # Chunk processing and file reading
+│   ├── backfill.go             # Backfill logic (chunking, file processing)
 │   ├── incremental.go          # Incremental sync logic
 │   ├── types.go                # Type definitions
-│   └── s3_test.go              # Unit tests (4 test suites)
+│   └── s3_test.go              # Unit tests (154+ test cases)
+├── pkg/parser/                  # Reusable parser package
+│   ├── parser.go               # Parser interface
+│   ├── csv.go                  # CSV parser with schema inference
+│   ├── json.go                 # JSON parser (JSONL/Array/Object)
+│   └── parquet.go              # Parquet parser with streaming
 ├── resources/
 │   └── spec.json               # Configuration specification
 ├── examples/                    # Testing and examples
@@ -227,22 +231,24 @@ drivers/s3/
 ### 1. Discovery Phase
 - Lists S3 objects in specified bucket/prefix
 - Filters by file format (`.csv`, `.json`, `.jsonl`, `.parquet`)
-- Groups files by folder (when `folder_grouping_enabled: true`)
-- Each folder becomes a stream (e.g., `users/`, `orders/`)
+- Groups files by first folder level after `path_prefix`
+- Each top-level folder becomes a stream (e.g., `users/`, `orders/`)
 
 ### 2. Schema Inference
 - Downloads first file from each stream
 - Parses content based on format:
-  - **CSV**: Reads header and samples rows for type detection
-  - **JSON**: Auto-detects JSONL/Array/Object format, infers field types
-  - **Parquet**: Reads native schema from file metadata
+  - **CSV**: Reads header and samples rows for type detection (uses AND logic for type inference)
+  - **JSON**: Auto-detects JSONL/Array/Object format, infers field types (uses AND logic)
+  - **Parquet**: Reads native schema from file metadata using S3 range requests
 - Generates `types.Stream` with columns and data types
-- Populates `available_cursor_fields` for incremental sync
+- Adds `_last_modified_time` field as cursor for incremental sync
 
 ### 3. Backfill/Sync
-- Creates one chunk per file
-- Processes files sequentially within each stream
+- Groups files into 2GB chunks for efficient processing
+- Large files (>2GB) processed individually with streaming
+- Processes files in parallel using configurable `max_threads`
 - Reads records in batches (format-specific parsing)
+- Injects `_last_modified_time` into every record
 - Sends batches to destination (Iceberg)
 - Handles compression transparently (`.gz` files)
 
@@ -298,10 +304,10 @@ Configure in `streams.json`:
 
 ## Known Limitations
 
-1. **File Chunking**: Files processed as single chunks (consider splitting large files >1GB)
-2. **Schema Evolution**: Manual re-discovery needed if file schema changes
-3. **Authentication**: Only access key/secret key (no IAM roles yet)
-4. **Compression**: Only gzip supported (no zip/bzip2)
+1. **Schema Evolution**: Manual re-discovery needed if file schema changes
+2. **Authentication**: Only access key/secret key (no IAM roles yet)
+3. **Compression**: Only gzip supported (no zip/bzip2)
+4. **Stream Grouping**: Fixed at level 1 (first folder only)
 
 ## Troubleshooting
 
@@ -330,7 +336,7 @@ docker compose down && docker compose up -d
 **No Streams Found**:
 - Check `path_prefix` matches your folder structure
 - Verify `file_format` matches file extensions (`.csv`, `.json`, `.parquet`)
-- Ensure `folder_grouping_enabled` matches your use case
+- Ensure files are organized in folders (e.g., `bucket/prefix/stream_name/files`)
 - Check bucket and prefix exist: `aws s3 ls s3://bucket-name/prefix/`
 
 **Files Missing from Stream**:

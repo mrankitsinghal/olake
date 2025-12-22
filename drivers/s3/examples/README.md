@@ -24,6 +24,7 @@ That's it! This will:
 
 - Docker installed and running
 - Go 1.19+ installed
+- Ports 9000, 9001, 5432 available
 
 ### Test Results
 
@@ -75,12 +76,13 @@ go test ./drivers/s3/internal/... -cover
 ```
 
 **Coverage:** 154+ test cases covering:
-- Chunking logic
-- Cursor-based filtering  
+- Chunking logic (2GB boundaries)
+- Cursor-based filtering (incremental sync)
 - Configuration validation
-- Parser configs
+- Parser configs (CSV/JSON/Parquet)
+- Type inference (AND logic)
 - Edge cases
-- Concurrent access
+- Backfill vs incremental flow separation
 
 ---
 
@@ -156,11 +158,13 @@ cd drivers/s3/examples
 - ✅ **JSON** (JSONL format, plain + gzip)
 
 #### Features
-- ✅ Multi-format support
+- ✅ Multi-format support (Parquet, CSV, JSON)
 - ✅ Compression handling (gzip, snappy)
-- ✅ Chunking logic (2GB chunks)
-- ✅ Schema inference
-- ✅ Incremental sync with `_last_modified_time`
+- ✅ Chunking logic (2GB chunks, using constants.EffectiveParquetSize)
+- ✅ Schema inference (CSV/JSON/Parquet with AND logic)
+- ✅ Incremental sync with `_last_modified_time` cursor field
+- ✅ Stream grouping at level 1 (first folder)
+- ✅ Optimized file metadata lookups
 - ✅ Data integrity in Iceberg
 
 ---
@@ -234,48 +238,50 @@ cd /Users/ankit.singhal/Developer/personal/olake/drivers/s3/examples
 
 **Total:** ~7.3GB | **Generation Time:** Several minutes
 
-### Expected Chunking Behavior
+---
 
-```
-Stream: chunk_test
+## 🐛 VS Code Debugging
 
-Small Files (total ~160MB):
-  ├─ small_10mb.parquet (10MB)
-  ├─ small_50mb.parquet (50MB)
-  └─ small_100mb.parquet (100MB)
-  → **Grouped into 1 chunk** (total < 2GB)
+### Debug Configurations Available
 
-Medium Files (total ~3GB):
-  ├─ medium_500mb.parquet (500MB)
-  ├─ medium_1gb.parquet (1GB)
-  └─ medium_1500mb.parquet (1.5GB)
-  → **Split into 2 chunks**
-     - Chunk 1: 500MB + 1GB = 1.5GB
-     - Chunk 2: 1.5GB
+The workspace includes **11 S3-specific debug configurations**:
 
-Large Files (individual):
-  ├─ large_2500mb.parquet (2.5GB)
-  │  → **1 chunk** (>2GB, cannot group)
-  └─ large_3gb.parquet (3GB)
-     → **1 chunk** (>2GB, cannot group)
+#### Discovery Debugging
+1. **S3: Check Connection** - Test S3 connectivity
+2. **S3: Discover - Parquet** - Debug Parquet file discovery
+3. **S3: Discover - CSV** - Debug CSV (+ gzip) discovery
+4. **S3: Discover - JSON** - Debug JSON/JSONL (+ gzip) discovery
 
-Total: 5 chunks
-```
+#### Sync Debugging (Full Load)
+5. **S3: Sync - Parquet (No State)** - Full backfill of Parquet files
+6. **S3: Sync - CSV (No State)** - Full backfill of CSV files
+7. **S3: Sync - JSON (No State)** - Full backfill of JSON files
 
-### Lite Mode Comparison
+#### Sync Debugging (Incremental)
+8. **S3: Sync - Parquet (With State)** - Incremental Parquet sync
+9. **S3: Sync - CSV (With State)** - Incremental CSV sync (tests gzip)
+10. **S3: Sync - JSON (With State)** - Incremental JSON sync (tests gzip)
 
-| Mode | Files | Total Size | Gen Time | Use Case |
-|------|-------|------------|----------|----------|
-| **Lite** | 1-35MB | ~120MB | <10s | Local dev, CI, quick tests |
-| **Full** | 10MB-3GB | ~7.3GB | ~5min | Pre-release, production validation |
+#### Utilities
+11. **S3: Spec** - View driver specification
 
-### Lite Mode Benefits
+### How to Use
 
-✅ **Fast iteration** - Test in seconds, not minutes  
-✅ **CI-friendly** - Lightweight for automated testing  
-✅ **Resource-efficient** - Won't freeze your laptop  
-✅ **Same logic** - Tests the same chunking behavior  
-✅ **Optional full mode** - Available when needed  
+1. Open VS Code in the Olake workspace
+2. Go to **Run and Debug** (⇧⌘D or Ctrl+Shift+D)
+3. Select configuration from dropdown
+4. Set breakpoints in S3 driver code
+5. Press **F5** to start debugging
+
+### Recommended Breakpoints
+
+- `drivers/s3/internal/s3.go:150` - File discovery
+- `drivers/s3/internal/s3.go:250` - Schema inference
+- `drivers/s3/internal/backfill.go` - Backfill logic and chunking
+- `drivers/s3/internal/incremental.go` - Incremental filtering
+- `pkg/parser/csv.go` - CSV parsing with schema inference
+- `pkg/parser/json.go` - JSON parsing (JSONL/Array/Object)
+- `pkg/parser/parquet.go` - Parquet parsing with streaming
 
 ---
 
@@ -521,30 +527,88 @@ docker stats
 
 ---
 
-## 📚 Test Data Generator
+## 📁 Project Structure
 
-### Go Program Location
-`testdata/main.go`
-
-### Build Manually
-```bash
-cd testdata
-go build -o ../generate-testdata main.go
+```
+drivers/s3/
+├── internal/
+│   ├── s3.go                    # Main driver (discovery, setup)
+│   ├── backfill.go              # Backfill logic (chunking, file processing)
+│   ├── incremental.go           # Incremental sync logic
+│   ├── config.go                # Configuration validation
+│   ├── types.go                 # Type definitions
+│   ├── s3_test.go               # Integration tests
+│   ├── edge_cases_test.go       # Edge case tests
+│   └── config_test.go           # Config tests
+│
+├── pkg/parser/                  # Reusable parser package (moved from drivers/parser)
+│   ├── parser.go                # Parser interface
+│   ├── csv.go                   # CSV parser with schema inference
+│   ├── json.go                  # JSON parser (JSONL/Array/Object)
+│   └── parquet.go               # Parquet parser with streaming
+│
+└── examples/
+    ├── testdata/
+    │   └── main.go              # Go test data generator
+    ├── generate_testdata.sh    # Generator wrapper
+    ├── run_tests.sh             # Test suite runner
+    ├── test_chunking.sh         # Chunk boundary tests
+    ├── upload_to_minio.sh      # MinIO upload script
+    ├── docker-compose.yml       # Docker services
+    └── README.md                # This file
 ```
 
-### Usage
-```bash
-./generate-testdata -size=small -format=all -output=test_data
-./generate-testdata -size=medium -format=parquet -output=custom_dir
-```
+---
 
-### Supported Options
-- `-size`: small, medium, large
-- `-format`: parquet, csv, json, all
-- `-output`: output directory path
-- `-chunk-test`: Generate chunk boundary test files
-- `-lite`: Use lite mode for chunk tests (smaller files)
-- `-target-mb`: Generate specific file size in MB
+## 🔧 Technology Stack
+
+- **Go 1.19+** - Test data generation, unit tests
+- **Shell (Bash)** - Test orchestration
+- **Docker** - MinIO, PostgreSQL/Iceberg
+- **MinIO** - S3-compatible storage
+- **PostgreSQL** - Iceberg catalog
+- **Parquet-go** - Parquet file handling
+
+---
+
+## 📈 Test Execution Times
+
+| Test Type | Records | Data Size | Time | Memory |
+|-----------|---------|-----------|------|--------|
+| Unit tests | N/A | N/A | ~2s | <100MB |
+| Small integration | ~65K | ~50MB | ~2min | ~500MB |
+| Medium integration | ~2.6M | ~2GB | ~10min | ~2GB |
+| Large integration | ~15.5M | ~10GB | ~45min | ~4GB |
+| Chunk boundary (lite) | ~1M | ~120MB | ~1min | ~500MB |
+| Chunk boundary (full) | ~50M | ~7GB | ~5min | ~2GB |
+
+---
+
+## ✅ What Gets Tested
+
+### Functional
+✅ Multi-format support (Parquet, CSV, JSON)  
+✅ Compression (gzip, snappy, none)  
+✅ Stream grouping at level 1 (first folder)  
+✅ Schema inference with AND logic  
+✅ Incremental sync with cursor  
+✅ State management  
+✅ Chunk-based parallel processing  
+✅ 2GB chunk boundaries  
+
+### Data Quality
+✅ Record counts match expectations  
+✅ No NULL primary keys  
+✅ Timestamps parsed correctly  
+✅ Data types correct  
+✅ Cursor field present (`_last_modified_time`)  
+✅ Compression roundtrips  
+
+### Performance
+✅ Small files group efficiently  
+✅ Large files (>2GB) stream properly  
+✅ Memory stays within bounds  
+✅ Parallel processing works  
 
 ---
 
@@ -583,97 +647,13 @@ cd drivers/s3/examples
 
 ---
 
-## 📁 Project Structure
-
-```
-drivers/s3/
-├── internal/
-│   ├── s3.go                    # Main driver
-│   ├── sync.go                  # Unified sync logic
-│   ├── config.go                # Configuration
-│   ├── s3_test.go               # Integration tests
-│   ├── sync_test.go             # Sync logic tests
-│   ├── edge_cases_test.go       # Edge case tests
-│   └── config_test.go           # Config tests
-│
-├── examples/
-│   ├── testdata/
-│   │   └── main.go              # Go test data generator
-│   ├── generate_testdata.sh    # Generator wrapper
-│   ├── run_tests.sh             # Test suite runner
-│   ├── test_chunking.sh         # Chunk boundary tests
-│   ├── upload_to_minio.sh      # MinIO upload script
-│   ├── docker-compose.yml       # Docker services
-│   └── README.md               # This file
-│
-└── parser/                      # Separate parser package
-    ├── parser.go                # Parser interface
-    ├── csv.go                   # CSV parser
-    ├── json.go                  # JSON parser
-    └── parquet.go               # Parquet parser
-```
-
----
-
-## 🔧 Technology Stack
-
-- **Go 1.19+** - Test data generation, unit tests
-- **Shell (Bash)** - Test orchestration
-- **Docker** - MinIO, PostgreSQL/Iceberg
-- **MinIO** - S3-compatible storage
-- **PostgreSQL** - Iceberg catalog
-- **Parquet-go** - Parquet file handling
-
----
-
-## 📈 Test Execution Times
-
-| Test Type | Records | Data Size | Time | Memory |
-|-----------|---------|-----------|------|--------|
-| Unit tests | N/A | N/A | ~2s | <100MB |
-| Small integration | ~65K | ~50MB | ~2min | ~500MB |
-| Medium integration | ~2.6M | ~2GB | ~10min | ~2GB |
-| Large integration | ~15.5M | ~10GB | ~45min | ~4GB |
-| Chunk boundary (lite) | ~1M | ~120MB | ~1min | ~500MB |
-| Chunk boundary (full) | ~50M | ~7GB | ~5min | ~2GB |
-
----
-
-## ✅ What Gets Tested
-
-### Functional
-✅ Multi-format support (Parquet, CSV, JSON)  
-✅ Compression (gzip, snappy, none)  
-✅ Stream grouping by folder  
-✅ Schema inference  
-✅ Incremental sync with cursor  
-✅ State management  
-✅ Chunk-based parallel processing  
-✅ 2GB chunk boundaries  
-
-### Data Quality
-✅ Record counts match expectations  
-✅ No NULL primary keys  
-✅ Timestamps parsed correctly  
-✅ Data types correct  
-✅ Cursor field present  
-✅ Compression roundtrips  
-
-### Performance
-✅ Small files group efficiently  
-✅ Large files (>2GB) stream properly  
-✅ Memory stays within bounds  
-✅ Parallel processing works  
-
----
-
 ## 🎉 Success Criteria
 
 After running all tests, you should see:
 
 - ✅ **Unit tests:** 154+ passing
 - ✅ **Small integration:** ~65K records synced
-- ✅ **Chunk testing:** 8 files, ~5 chunks, correct grouping
+- ✅ **Chunk testing:** 8 files, correct grouping
 - ✅ **All formats:** Parquet, CSV, JSON working
 - ✅ **All compressions:** Gzip, Snappy, None working
 - ✅ **Iceberg tables:** Created with correct schemas
@@ -710,6 +690,7 @@ rm -f generate-testdata
 ✅ **Multiple integration test sizes**  
 ✅ **Chunk boundary verification with Lite Mode**  
 ✅ **Large dataset support** (15.5M records)  
+✅ **VS Code debugging** with 11 configurations  
 
 ### Quick Commands Reference
 
