@@ -1,12 +1,15 @@
 package main
 
+// This file generates test data using math/rand for non-cryptographic purposes.
+// math/rand is acceptable here as we're generating test data, not security-sensitive values.
+
 import (
 	"compress/gzip"
 	"encoding/csv"
 	"encoding/json"
 	"flag"
 	"fmt"
-	"math/rand"
+	"math/rand" //nosec G404 // math/rand is acceptable for test data generation
 	"os"
 	"path/filepath"
 	"time"
@@ -61,11 +64,11 @@ type Product struct {
 }
 
 var (
-	statuses        = []string{"active", "inactive", "pending", "suspended"}
-	orderStatuses   = []string{"pending", "completed", "cancelled", "shipped", "delivered"}
-	paymentMethods  = []string{"credit_card", "paypal", "bank_transfer", "cash"}
-	categories      = []string{"Electronics", "Clothing", "Books", "Home & Garden", "Toys", "Sports"}
-	subcategories   = []string{"Subcat 1", "Subcat 2", "Subcat 3", "Subcat 4", "Subcat 5"}
+	statuses       = []string{"active", "inactive", "pending", "suspended"}
+	orderStatuses  = []string{"pending", "completed", "cancelled", "shipped", "delivered"}
+	paymentMethods = []string{"credit_card", "paypal", "bank_transfer", "cash"}
+	categories     = []string{"Electronics", "Clothing", "Books", "Home & Garden", "Toys", "Sports"}
+	subcategories  = []string{"Subcat 1", "Subcat 2", "Subcat 3", "Subcat 4", "Subcat 5"}
 )
 
 func init() {
@@ -82,13 +85,13 @@ func generateUsers(baseDate time.Time, count int) []User {
 			Email:     fmt.Sprintf("user%d@example.com", i+1),
 			FirstName: fmt.Sprintf("First%d", i+1),
 			LastName:  fmt.Sprintf("Last%d", i+1),
-			Phone:     fmt.Sprintf("+1-%03d-%03d-%04d", rand.Intn(900)+100, rand.Intn(900)+100, rand.Intn(9000)+1000),
-			Address:   fmt.Sprintf("%d Main St, City %d", rand.Intn(9999)+1, i%100),
+			Phone:     fmt.Sprintf("+1-%03d-%03d-%04d", rand.Intn(900)+100, rand.Intn(900)+100, rand.Intn(9000)+1000), //nosec G404
+			Address:   fmt.Sprintf("%d Main St, City %d", rand.Intn(9999)+1, i%100),                                   //nosec G404
 			CreatedAt: baseDate.Add(time.Duration(i%8760) * time.Hour),
 			UpdatedAt: baseDate.Add(time.Duration(i%8760)*time.Hour + 30*time.Minute),
-			Status:    statuses[rand.Intn(len(statuses))],
-			Age:       rand.Intn(63) + 18,
-			Balance:   float64(rand.Intn(100000)) / 10.0,
+			Status:    statuses[rand.Intn(len(statuses))], //nosec G404
+			Age:       rand.Intn(63) + 18,                 //nosec G404
+			Balance:   float64(rand.Intn(100000)) / 10.0,  //nosec G404
 		}
 	}
 	return users
@@ -99,17 +102,17 @@ func generateOrders(baseDate time.Time, count int) []Order {
 	for i := 0; i < count; i++ {
 		orders[i] = Order{
 			OrderID:       int64(i + 1),
-			UserID:        int64(rand.Intn(count/10) + 1),
-			ProductID:     int64(rand.Intn(1000) + 1),
-			Amount:        float64(rand.Intn(99000)+1000) / 100.0,
-			Quantity:      rand.Intn(10) + 1,
-			Tax:           float64(rand.Intn(5000)+50) / 100.0,
-			ShippingCost:  float64(rand.Intn(2000)+500) / 100.0,
-			Discount:      float64(rand.Intn(10000)) / 100.0,
+			UserID:        int64(rand.Intn(count/10) + 1),         //nosec G404
+			ProductID:     int64(rand.Intn(1000) + 1),             //nosec G404
+			Amount:        float64(rand.Intn(99000)+1000) / 100.0, //nosec G404
+			Quantity:      rand.Intn(10) + 1,                      //nosec G404
+			Tax:           float64(rand.Intn(5000)+50) / 100.0,    //nosec G404
+			ShippingCost:  float64(rand.Intn(2000)+500) / 100.0,   //nosec G404
+			Discount:      float64(rand.Intn(10000)) / 100.0,      //nosec G404
 			OrderDate:     baseDate.Add(time.Duration(i%8760) * time.Hour),
 			UpdatedAt:     baseDate.Add(time.Duration(i%8760)*time.Hour + 15*time.Minute),
-			Status:        orderStatuses[rand.Intn(len(orderStatuses))],
-			PaymentMethod: paymentMethods[rand.Intn(len(paymentMethods))],
+			Status:        orderStatuses[rand.Intn(len(orderStatuses))],   //nosec G404
+			PaymentMethod: paymentMethods[rand.Intn(len(paymentMethods))], //nosec G404
 		}
 	}
 	return orders
@@ -122,15 +125,15 @@ func generateProducts(baseDate time.Time, count int) []Product {
 			ProductID:   int64(i + 1),
 			ProductName: fmt.Sprintf("Product %d", i+1),
 			SKU:         fmt.Sprintf("SKU-%08d", i+1),
-			Category:    categories[rand.Intn(len(categories))],
-			Subcategory: subcategories[rand.Intn(len(subcategories))],
-			Price:       float64(rand.Intn(49500)+500) / 100.0,
-			Cost:        float64(rand.Intn(24800)+200) / 100.0,
-			Stock:       rand.Intn(500),
+			Category:    categories[rand.Intn(len(categories))],       //nosec G404
+			Subcategory: subcategories[rand.Intn(len(subcategories))], //nosec G404
+			Price:       float64(rand.Intn(49500)+500) / 100.0,        //nosec G404
+			Cost:        float64(rand.Intn(24800)+200) / 100.0,        //nosec G404
+			Stock:       rand.Intn(500),                               //nosec G404
 			Description: fmt.Sprintf("This is product %d with various features and benefits", i+1),
 			CreatedAt:   baseDate,
 			UpdatedAt:   baseDate.Add(time.Duration(i%8760) * time.Hour),
-			IsActive:    rand.Intn(2) == 1,
+			IsActive:    rand.Intn(2) == 1, //nosec G404
 		}
 	}
 	return products
@@ -139,7 +142,7 @@ func generateProducts(baseDate time.Time, count int) []Product {
 // Save functions
 func saveParquet(filename string, data interface{}) error {
 	os.MkdirAll(filepath.Dir(filename), 0755)
-	
+
 	file, err := os.Create(filename)
 	if err != nil {
 		return fmt.Errorf("failed to create file: %w", err)
@@ -332,13 +335,13 @@ func generateChunkTestFiles(baseDate time.Time, format string, outputDir string,
 	// - Small: 10MB, 50MB, 100MB (should group together in 2GB chunks)
 	// - Medium: 500MB, 1GB, 1.5GB (edge cases - some grouping)
 	// - Large: 2.5GB, 3GB (individual chunks, >2GB)
-	
+
 	var sizes []struct {
 		name      string
 		sizeMB    int
 		recordMod int // Approximate records for this size
 	}
-	
+
 	if lite {
 		sizes = []struct {
 			name      string
@@ -380,7 +383,7 @@ func generateChunkTestFiles(baseDate time.Time, format string, outputDir string,
 				fmt.Printf("Error: %v\n", err)
 			} else {
 				actualSize := float64(getFileSize(filename)) / (1024 * 1024)
-				fmt.Printf("✓ %s (target: %dMB, actual: %.2fMB, %d records)\n", 
+				fmt.Printf("✓ %s (target: %dMB, actual: %.2fMB, %d records)\n",
 					s.name, s.sizeMB, actualSize, len(users))
 			}
 		}
@@ -395,7 +398,7 @@ func generateChunkTestFiles(baseDate time.Time, format string, outputDir string,
 				fmt.Printf("Error: %v\n", err)
 			} else {
 				actualSize := float64(getFileSize(filename)) / (1024 * 1024)
-				fmt.Printf("✓ %s (target: %dMB, actual: %.2fMB, %d records, gzipped)\n", 
+				fmt.Printf("✓ %s (target: %dMB, actual: %.2fMB, %d records, gzipped)\n",
 					s.name, s.sizeMB, actualSize, len(orders))
 			}
 		}
@@ -410,7 +413,7 @@ func generateChunkTestFiles(baseDate time.Time, format string, outputDir string,
 				fmt.Printf("Error: %v\n", err)
 			} else {
 				actualSize := float64(getFileSize(filename)) / (1024 * 1024)
-				fmt.Printf("✓ %s (target: %dMB, actual: %.2fMB, %d records, JSONL, gzipped)\n", 
+				fmt.Printf("✓ %s (target: %dMB, actual: %.2fMB, %d records, JSONL, gzipped)\n",
 					s.name, s.sizeMB, actualSize, len(products))
 			}
 		}
@@ -456,7 +459,7 @@ func main() {
 
 	// Determine counts based on size
 	var userCount, orderCount, productCount int
-	
+
 	if *targetSizeMB > 0 {
 		// Calculate approximate record counts for target file size
 		// User: ~60 bytes compressed, Order: ~40 bytes, Product: ~50 bytes
@@ -502,7 +505,7 @@ func main() {
 	// Generate Parquet
 	if *format == "all" || *format == "parquet" {
 		fmt.Println("📦 Generating Parquet files...")
-		
+
 		users := generateUsers(baseDate, userCount)
 		filename := filepath.Join(*outputDir, "parquet", "users", "data.parquet")
 		if err := saveParquet(filename, users); err != nil {
@@ -531,7 +534,7 @@ func main() {
 	// Generate CSV
 	if *format == "all" || *format == "csv" {
 		fmt.Println("\n📄 Generating CSV files...")
-		
+
 		users := generateUsers(baseDate, userCount)
 		filename := filepath.Join(*outputDir, "csv", "users", "data.csv.gz")
 		if err := saveCSV(filename, users, true); err != nil {
@@ -560,7 +563,7 @@ func main() {
 	// Generate JSON
 	if *format == "all" || *format == "json" {
 		fmt.Println("\n🔤 Generating JSON files...")
-		
+
 		users := generateUsers(baseDate, userCount)
 		filename := filepath.Join(*outputDir, "json", "users", "data.jsonl.gz")
 		if err := saveJSON(filename, users, true, true); err != nil {
@@ -591,4 +594,3 @@ func main() {
 	fmt.Printf("  1. Upload to MinIO: cd ../examples && ./upload_to_minio.sh\n")
 	fmt.Printf("  2. Run tests: ./run_tests.sh\n")
 }
-

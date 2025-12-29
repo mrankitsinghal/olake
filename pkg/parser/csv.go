@@ -30,7 +30,7 @@ func NewCSVParser(config CSVConfig, stream *types.Stream) *CSVParser {
 
 // InferSchema reads the first few rows of a CSV file to infer the schema
 // Uses small samples to avoid loading entire file into memory
-func (p *CSVParser) InferSchema(ctx context.Context, reader io.Reader) (*types.Stream, error) {
+func (p *CSVParser) InferSchema(_ context.Context, reader io.Reader) (*types.Stream, error) {
 	logger.Debug("Inferring CSV schema from sample data")
 
 	// Create CSV reader
@@ -280,6 +280,7 @@ func convertValue(value string, fieldType types.DataType) (interface{}, error) {
 
 	// Handle null/empty values
 	if trimmed == "" || strings.ToLower(trimmed) == "null" {
+		//nolint: nilnil // nil is a valid value for null/empty fields
 		return nil, nil
 	}
 
@@ -348,4 +349,3 @@ func convertValue(value string, fieldType types.DataType) (interface{}, error) {
 	// Default to string (including types.String, types.Null)
 	return trimmed, nil
 }
-

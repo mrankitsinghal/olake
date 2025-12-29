@@ -12,64 +12,64 @@ import (
 
 func TestInferJSONFieldType_NumbersAlwaysFloat64(t *testing.T) {
 	tests := []struct {
-		name        string
-		values      []interface{}
+		name         string
+		values       []interface{}
 		expectedType types.DataType
-		description string
+		description  string
 	}{
 		{
-			name:        "integer numbers should be Float64",
-			values:      []interface{}{1.0, 2.0, 3.0},
+			name:         "integer numbers should be Float64",
+			values:       []interface{}{1.0, 2.0, 3.0},
 			expectedType: types.Float64,
-			description: "JSON integers should be inferred as Float64 to avoid Int64/Float64 conflicts",
+			description:  "JSON integers should be inferred as Float64 to avoid Int64/Float64 conflicts",
 		},
 		{
-			name:        "float numbers should be Float64",
-			values:      []interface{}{1.5, 2.7, 3.9},
+			name:         "float numbers should be Float64",
+			values:       []interface{}{1.5, 2.7, 3.9},
 			expectedType: types.Float64,
-			description: "JSON floats should be inferred as Float64",
+			description:  "JSON floats should be inferred as Float64",
 		},
 		{
-			name:        "mixed integer and float should be Float64",
-			values:      []interface{}{1.0, 2.5, 3.0, 4.7},
+			name:         "mixed integer and float should be Float64",
+			values:       []interface{}{1.0, 2.5, 3.0, 4.7},
 			expectedType: types.Float64,
-			description: "Mixed JSON numbers should be inferred as Float64",
+			description:  "Mixed JSON numbers should be inferred as Float64",
 		},
 		{
-			name:        "boolean values",
-			values:      []interface{}{true, false, true},
+			name:         "boolean values",
+			values:       []interface{}{true, false, true},
 			expectedType: types.Bool,
-			description: "Boolean values should be inferred as Bool",
+			description:  "Boolean values should be inferred as Bool",
 		},
 		{
-			name:        "string values",
-			values:      []interface{}{"hello", "world", "test"},
+			name:         "string values",
+			values:       []interface{}{"hello", "world", "test"},
 			expectedType: types.String,
-			description: "String values should be inferred as String",
+			description:  "String values should be inferred as String",
 		},
 		{
-			name:        "object values",
-			values:      []interface{}{map[string]interface{}{"key": "value"}},
+			name:         "object values",
+			values:       []interface{}{map[string]interface{}{"key": "value"}},
 			expectedType: types.String,
-			description: "Object values should be inferred as String (stored as JSON string)",
+			description:  "Object values should be inferred as String (stored as JSON string)",
 		},
 		{
-			name:        "array values",
-			values:      []interface{}{[]interface{}{1, 2, 3}},
+			name:         "array values",
+			values:       []interface{}{[]interface{}{1, 2, 3}},
 			expectedType: types.String,
-			description: "Array values should be inferred as String (stored as JSON string)",
+			description:  "Array values should be inferred as String (stored as JSON string)",
 		},
 		{
-			name:        "mixed types default to string",
-			values:      []interface{}{"text", 123.0, true},
+			name:         "mixed types default to string",
+			values:       []interface{}{"text", 123.0, true},
 			expectedType: types.String,
-			description: "Mixed types should default to String",
+			description:  "Mixed types should default to String",
 		},
 		{
-			name:        "null values ignored",
-			values:      []interface{}{nil, 1.0, nil, 2.0},
+			name:         "null values ignored",
+			values:       []interface{}{nil, 1.0, nil, 2.0},
 			expectedType: types.Float64,
-			description: "Null values should be ignored in type inference",
+			description:  "Null values should be ignored in type inference",
 		},
 	}
 
@@ -219,34 +219,34 @@ func TestJSONParser_StreamRecords_TypeConsistency(t *testing.T) {
 
 func TestInferJSONFieldType_PriorityOrder(t *testing.T) {
 	tests := []struct {
-		name        string
-		values      []interface{}
+		name         string
+		values       []interface{}
 		expectedType types.DataType
-		description string
+		description  string
 	}{
 		{
-			name:        "Bool has highest priority",
-			values:      []interface{}{true, false, true},
+			name:         "Bool has highest priority",
+			values:       []interface{}{true, false, true},
 			expectedType: types.Bool,
-			description: "Bool should have priority over other types",
+			description:  "Bool should have priority over other types",
 		},
 		{
-			name:        "Float64 has priority over Object/Array",
-			values:      []interface{}{1.0, map[string]interface{}{"key": "value"}},
+			name:         "Float64 has priority over Object/Array",
+			values:       []interface{}{1.0, map[string]interface{}{"key": "value"}},
 			expectedType: types.String, // Mixed types default to String
-			description: "Mixed number and object should default to String",
+			description:  "Mixed number and object should default to String",
 		},
 		{
-			name:        "Float64 has priority over String",
-			values:      []interface{}{1.0, 2.0, 3.0},
+			name:         "Float64 has priority over String",
+			values:       []interface{}{1.0, 2.0, 3.0},
 			expectedType: types.Float64,
-			description: "All numbers should be Float64",
+			description:  "All numbers should be Float64",
 		},
 		{
-			name:        "Object/Array has priority over String",
-			values:      []interface{}{map[string]interface{}{"key": "value"}},
+			name:         "Object/Array has priority over String",
+			values:       []interface{}{map[string]interface{}{"key": "value"}},
 			expectedType: types.String,
-			description: "Object should be stored as String (JSON string)",
+			description:  "Object should be stored as String (JSON string)",
 		},
 	}
 
@@ -257,4 +257,3 @@ func TestInferJSONFieldType_PriorityOrder(t *testing.T) {
 		})
 	}
 }
-

@@ -41,5 +41,3 @@ type JSONConfig struct {
 type ParquetConfig struct {
 	StreamingEnabled bool `json:"streaming_enabled"` // Default: true - use range requests
 }
-
-

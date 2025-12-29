@@ -33,7 +33,7 @@ func NewParquetParser(config ParquetConfig, stream *types.Stream) *ParquetParser
 // InferSchema reads Parquet file metadata to infer the schema
 // For Parquet, schema is stored in file metadata, so we don't need to read data
 // NOTE: reader must be io.ReaderAt for Parquet (use S3RangeReader or bytes.Reader)
-func (p *ParquetParser) InferSchema(ctx context.Context, reader io.Reader) (*types.Stream, error) {
+func (p *ParquetParser) InferSchema(_ context.Context, reader io.Reader) (*types.Stream, error) {
 	logger.Debug("Inferring Parquet schema from file metadata")
 
 	// Prepare reader and get file size
@@ -369,9 +369,13 @@ func decodeParquetDecimal(val pq.Value, scale int32) (decimal.Decimal, error) {
 
 		// two's complement (signed)
 		if raw[0]&0x80 != 0 {
+			// Check for potential overflow before conversion
+			if uint(len(raw)) > (^uint(0))/8 {
+				return decimal.Zero, fmt.Errorf("decimal byte array too large for bit length calculation")
+			}
 			bitLen := uint(len(raw) * 8)
-			max := new(big.Int).Lsh(big.NewInt(1), bitLen)
-			unscaled.Sub(unscaled, max)
+			maxValue := new(big.Int).Lsh(big.NewInt(1), bitLen)
+			unscaled.Sub(unscaled, maxValue)
 		}
 
 	default:

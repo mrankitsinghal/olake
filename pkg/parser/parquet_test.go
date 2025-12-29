@@ -121,11 +121,11 @@ func TestParquetValueToInterfaceWithType_Date(t *testing.T) {
 
 func TestParquetValueToInterfaceWithType_Timestamp(t *testing.T) {
 	tests := []struct {
-		name        string
+		name         string
 		createSchema func() pq.Type
-		rawValue    int64
-		expected    string // RFC3339 format
-		description string
+		rawValue     int64
+		expected     string // RFC3339 format
+		description  string
 	}{
 		{
 			name: "Timestamp nanoseconds",
@@ -183,19 +183,19 @@ func TestParquetValueToInterfaceWithType_Timestamp(t *testing.T) {
 			val := pq.Int64Value(tt.rawValue)
 			pqType := tt.createSchema()
 			result := parquetValueToInterfaceWithType(val, pqType)
-			
+
 			// Parse both to compare (handles timezone differences)
 			expectedTime, err := time.Parse(time.RFC3339, tt.expected)
 			require.NoError(t, err)
-			
+
 			resultStr, ok := result.(string)
 			require.True(t, ok, "Result should be string")
 			resultTime, err := time.Parse(time.RFC3339, resultStr)
 			require.NoError(t, err)
-			
+
 			// Compare with 1 second tolerance (for rounding)
 			diff := resultTime.Sub(expectedTime)
-			assert.True(t, diff < time.Second && diff > -time.Second, 
+			assert.True(t, diff < time.Second && diff > -time.Second,
 				"Expected %s, got %s (diff: %v)", tt.expected, resultStr, diff)
 		})
 	}
@@ -203,11 +203,11 @@ func TestParquetValueToInterfaceWithType_Timestamp(t *testing.T) {
 
 func TestParquetValueToInterfaceWithType_Time(t *testing.T) {
 	tests := []struct {
-		name        string
+		name         string
 		createSchema func() pq.Type
-		rawValue    interface{} // int32 or int64
-		expected    int64       // seconds
-		description string
+		rawValue     interface{} // int32 or int64
+		expected     int64       // seconds
+		description  string
 	}{
 		{
 			name: "Time Int32 milliseconds",
@@ -268,10 +268,10 @@ func TestParquetValueToInterfaceWithType_Time(t *testing.T) {
 			} else {
 				val = pq.Int64Value(tt.rawValue.(int64))
 			}
-			
+
 			pqType := tt.createSchema()
 			result := parquetValueToInterfaceWithType(val, pqType)
-			
+
 			resultInt, ok := result.(int64)
 			require.True(t, ok, "Result should be int64")
 			assert.Equal(t, tt.expected, resultInt, tt.description)
@@ -364,7 +364,7 @@ func TestDecodeParquetDecimal(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			val := tt.createValue()
 			result, err := decodeParquetDecimal(val, tt.scale)
-			
+
 			if tt.expectError {
 				assert.Error(t, err, tt.description)
 			} else {
@@ -372,7 +372,7 @@ func TestDecodeParquetDecimal(t *testing.T) {
 				if tt.expected != "" {
 					expectedDec, err := decimal.NewFromString(tt.expected)
 					require.NoError(t, err)
-					assert.True(t, result.Equal(expectedDec), 
+					assert.True(t, result.Equal(expectedDec),
 						"Expected %s, got %s", tt.expected, result.String())
 				} else {
 					// For negative two's complement test, just verify it's not zero
@@ -391,19 +391,19 @@ func TestParquetValueToInterfaceWithType_Decimal(t *testing.T) {
 		"decimal": pq.Decimal(10, 2, pq.Int64Type),
 	})
 	decimalType := schema.Fields()[0].Type()
-	
+
 	// Get the actual scale from the schema
 	logicalType := decimalType.LogicalType()
 	require.NotNil(t, logicalType, "Should have logical type")
 	require.NotNil(t, logicalType.Decimal, "Should be decimal type")
 	actualScale := logicalType.Decimal.Scale
-	
+
 	// Use a value that works with the actual scale
 	// If scale is 10, then 1234500000000 with scale 10 = 123.45
 	// If scale is 2, then 12345 with scale 2 = 123.45
 	var testValue int64
 	var expectedResult float64
-	
+
 	if actualScale == 10 {
 		testValue = 1234500000000 // Will give 123.45 with scale 10
 		expectedResult = 123.45
@@ -415,28 +415,28 @@ func TestParquetValueToInterfaceWithType_Decimal(t *testing.T) {
 		testValue = 12345
 		expectedResult = float64(testValue) / float64(pow10ForTest(actualScale))
 	}
-	
+
 	val := pq.Int64Value(testValue)
-	
+
 	// Test the decodeParquetDecimal function directly
 	dec, err := decodeParquetDecimal(val, actualScale)
 	require.NoError(t, err)
 	directResult, _ := dec.Float64()
-	
+
 	// Now test through the full conversion
 	result := parquetValueToInterfaceWithType(val, decimalType)
-	
+
 	resultFloat, ok := result.(float64)
 	require.True(t, ok, "Result should be float64")
-	
+
 	// Verify both match
-	assert.InDelta(t, directResult, resultFloat, 0.0001, 
+	assert.InDelta(t, directResult, resultFloat, 0.0001,
 		"Full conversion should match direct decode. Got %f, expected %f", resultFloat, directResult)
-	
+
 	// If we calculated expectedResult, verify it
 	if expectedResult > 0 {
-		assert.InDelta(t, expectedResult, resultFloat, 0.01, 
-			"Should convert decimal correctly. Got %f, expected %f (scale: %d)", 
+		assert.InDelta(t, expectedResult, resultFloat, 0.01,
+			"Should convert decimal correctly. Got %f, expected %f (scale: %d)",
 			resultFloat, expectedResult, actualScale)
 	}
 }
@@ -459,9 +459,9 @@ func TestParquetValueToInterfaceWithType_ByteArray(t *testing.T) {
 		description string
 	}{
 		{
-			name:        "Valid UTF-8 string",
-			data:        []byte("Hello, World!"),
-			expected:    "Hello, World!",
+			name:     "Valid UTF-8 string",
+			data:     []byte("Hello, World!"),
+			expected: "Hello, World!",
 			checkType: func(v interface{}) bool {
 				_, ok := v.(string)
 				return ok
@@ -469,9 +469,9 @@ func TestParquetValueToInterfaceWithType_ByteArray(t *testing.T) {
 			description: "Valid UTF-8 should return as string",
 		},
 		{
-			name:        "Invalid UTF-8 (binary data)",
-			data:        []byte{0xFF, 0xFE, 0xFD},
-			expected:    "//79", // Base64 encoding of [0xFF, 0xFE, 0xFD]
+			name:     "Invalid UTF-8 (binary data)",
+			data:     []byte{0xFF, 0xFE, 0xFD},
+			expected: "//79", // Base64 encoding of [0xFF, 0xFE, 0xFD]
 			checkType: func(v interface{}) bool {
 				str, ok := v.(string)
 				if !ok {
@@ -488,9 +488,9 @@ func TestParquetValueToInterfaceWithType_ByteArray(t *testing.T) {
 			description: "Invalid UTF-8 should be base64 encoded",
 		},
 		{
-			name:        "Empty byte array",
-			data:        []byte{},
-			expected:    "",
+			name:     "Empty byte array",
+			data:     []byte{},
+			expected: "",
 			checkType: func(v interface{}) bool {
 				_, ok := v.(string)
 				return ok
@@ -503,7 +503,7 @@ func TestParquetValueToInterfaceWithType_ByteArray(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			val := pq.ByteArrayValue(tt.data)
 			result := parquetValueToInterfaceWithType(val, pq.ByteArrayType)
-			
+
 			assert.True(t, tt.checkType(result), tt.description)
 			if tt.expected != "" {
 				assert.Equal(t, tt.expected, result, tt.description)
@@ -526,7 +526,7 @@ func TestParquetValueToInterfaceWithType_PhysicalTypes(t *testing.T) {
 			createValue: func() pq.Value {
 				return pq.BooleanValue(true)
 			},
-			pqType: pq.BooleanType,
+			pqType:   pq.BooleanType,
 			expected: true,
 			checkType: func(v interface{}) bool {
 				_, ok := v.(bool)
@@ -539,7 +539,7 @@ func TestParquetValueToInterfaceWithType_PhysicalTypes(t *testing.T) {
 			createValue: func() pq.Value {
 				return pq.Int32Value(12345)
 			},
-			pqType: pq.Int32Type,
+			pqType:   pq.Int32Type,
 			expected: int64(12345),
 			checkType: func(v interface{}) bool {
 				_, ok := v.(int64)
@@ -552,7 +552,7 @@ func TestParquetValueToInterfaceWithType_PhysicalTypes(t *testing.T) {
 			createValue: func() pq.Value {
 				return pq.Int64Value(9223372036854775807)
 			},
-			pqType: pq.Int64Type,
+			pqType:   pq.Int64Type,
 			expected: int64(9223372036854775807),
 			checkType: func(v interface{}) bool {
 				_, ok := v.(int64)
@@ -577,7 +577,7 @@ func TestParquetValueToInterfaceWithType_PhysicalTypes(t *testing.T) {
 			createValue: func() pq.Value {
 				return pq.DoubleValue(3.141592653589793)
 			},
-			pqType: pq.DoubleType,
+			pqType:   pq.DoubleType,
 			expected: 3.141592653589793,
 			checkType: func(v interface{}) bool {
 				_, ok := v.(float64)
@@ -590,7 +590,7 @@ func TestParquetValueToInterfaceWithType_PhysicalTypes(t *testing.T) {
 			createValue: func() pq.Value {
 				return pq.NullValue()
 			},
-			pqType: pq.Int32Type,
+			pqType:   pq.Int32Type,
 			expected: nil,
 			checkType: func(v interface{}) bool {
 				return v == nil
@@ -603,7 +603,7 @@ func TestParquetValueToInterfaceWithType_PhysicalTypes(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			val := tt.createValue()
 			result := parquetValueToInterfaceWithType(val, tt.pqType)
-			
+
 			assert.True(t, tt.checkType(result), tt.description)
 			if tt.expected != nil {
 				if expectedFloat, ok := tt.expected.(float64); ok {
@@ -682,7 +682,7 @@ func TestPrepareParquetReader(t *testing.T) {
 	t.Run("Valid ReaderAt and Seeker", func(t *testing.T) {
 		data := []byte("test data")
 		reader := bytes.NewReader(data)
-		
+
 		readerAt, fileSize, err := prepareParquetReader(reader)
 		require.NoError(t, err)
 		assert.NotNil(t, readerAt)
@@ -700,7 +700,7 @@ func TestPrepareParquetReader(t *testing.T) {
 		// Create a ReaderAt that doesn't implement Seeker
 		// bytes.Reader implements both, so we need a custom type
 		ro := &readerAtOnly{data: []byte("test")}
-		
+
 		// This should fail because we need Seeker to determine file size
 		_, _, err := prepareParquetReader(ro)
 		assert.Error(t, err)
@@ -749,7 +749,6 @@ func TestParquetParser_Integration(t *testing.T) {
 	// 2. Use InferSchema to read the schema
 	// 3. Use StreamRecords to read the data
 	// 4. Verify the results
-	
+
 	t.Skip("Integration test requires actual Parquet file - implement when needed")
 }
-

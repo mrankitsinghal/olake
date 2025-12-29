@@ -13,11 +13,11 @@ import (
 
 func TestInferColumnType_TimestampDetection(t *testing.T) {
 	tests := []struct {
-		name           string
-		sampleRows     [][]string
-		columnIndex    int
-		expectedType   types.DataType
-		description    string
+		name         string
+		sampleRows   [][]string
+		columnIndex  int
+		expectedType types.DataType
+		description  string
 	}{
 		{
 			name: "timestamp with millisecond precision",
@@ -429,4 +429,3 @@ func TestCSVParser_StreamRecords_TypeConversion(t *testing.T) {
 	assert.IsType(t, float32(0), firstRecord["score"], "score should be float32")
 	assert.IsType(t, false, firstRecord["is_active"], "is_active should be bool")
 }
-
