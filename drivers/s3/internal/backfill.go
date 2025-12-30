@@ -97,7 +97,7 @@ func (s *S3) groupFilesIntoChunks(files []FileObject) *types.Set[types.Chunk] {
 			// Add large file as separate chunk (array with single element for consistency)
 			chunks.Insert(types.Chunk{
 				Min: []string{file.FileKey}, // Array of one file key (consistent with small files)
-				Max: file.Size,               // File size
+				Max: file.Size,              // File size
 			})
 			logger.Debugf("Large file (%d MB) in separate chunk: %s",
 				file.Size/(1024*1024), file.FileKey)
@@ -273,7 +273,3 @@ func (s *S3) getFileLastModified(streamName, fileKey string) string {
 
 	return ""
 }
-
-
-
-

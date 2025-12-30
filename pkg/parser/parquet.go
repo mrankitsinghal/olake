@@ -308,7 +308,6 @@ func parquetValueToInterfaceWithType(val pq.Value, fieldType pq.Type) interface{
 
 		// Decimal stored as INT32/INT64/BYTE_ARRAY/FIXED_LEN_BYTE_ARRAY
 		if logicalType.Decimal != nil {
-
 			dec, err := decodeParquetDecimal(val, logicalType.Decimal.Scale)
 			if err != nil {
 				logger.Warnf("decimal decode failed: %v", err)
@@ -352,7 +351,6 @@ func decodeParquetDecimal(val pq.Value, scale int32) (decimal.Decimal, error) {
 	var unscaled *big.Int
 
 	switch val.Kind() {
-
 	case pq.Int32:
 		unscaled = big.NewInt(int64(val.Int32()))
 

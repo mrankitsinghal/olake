@@ -41,9 +41,9 @@ func (s *S3) FetchMaxCursorValues(ctx context.Context, stream types.StreamInterf
 
 // StreamIncrementalChanges processes files that were added/modified after backfill completed
 // This follows olake's incremental sync architecture:
-//   1. Backfill phase processes all discovered files
-//   2. This method processes only files added/modified AFTER the cursor (LastModified > cursor)
-//   3. Processes files sequentially (no chunking/parallelization for simplicity)
+//  1. Backfill phase processes all discovered files
+//  2. This method processes only files added/modified AFTER the cursor (LastModified > cursor)
+//  3. Processes files sequentially (no chunking/parallelization for simplicity)
 func (s *S3) StreamIncrementalChanges(ctx context.Context, stream types.StreamInterface, cb abstract.BackfillMsgFn) error {
 	streamName := stream.Name()
 
@@ -143,7 +143,3 @@ func (s *S3) filterFilesByCursor(files []FileObject, cursorTimestamp string) []F
 		len(filteredFiles), len(files), cursorTimestamp)
 	return filteredFiles
 }
-
-
-
-

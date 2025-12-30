@@ -155,14 +155,14 @@ func TestConfigValidation(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			err := tt.config.Validate()
 
-		if tt.expectError {
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), tt.errorMsg)
-		} else {
-			require.NoError(t, err)
-			// Check defaults are applied
-			assert.NotZero(t, tt.config.MaxThreads)
-		}
+			if tt.expectError {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.errorMsg)
+			} else {
+				require.NoError(t, err)
+				// Check defaults are applied
+				assert.NotZero(t, tt.config.MaxThreads)
+			}
 		})
 	}
 }
@@ -336,20 +336,18 @@ func TestFilterFilesByCursor(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			filtered := s.filterFilesByCursor(files, tt.cursorTimestamp)
-			
+
 			assert.Equal(t, tt.expectedCount, len(filtered), "filtered file count mismatch")
-			
+
 			// Verify expected files are in the filtered result
 			filteredKeys := make([]string, len(filtered))
 			for i, f := range filtered {
 				filteredKeys[i] = f.FileKey
 			}
-			
+
 			for _, expectedFile := range tt.expectedFiles {
 				assert.Contains(t, filteredKeys, expectedFile, "expected file not found in filtered results")
 			}
 		})
 	}
 }
-
-

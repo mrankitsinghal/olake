@@ -13,10 +13,10 @@ import (
 // TestGroupFilesIntoChunks tests the 2GB chunking logic
 func TestGroupFilesIntoChunks(t *testing.T) {
 	tests := []struct {
-		name          string
-		files         []FileObject
+		name           string
+		files          []FileObject
 		expectedChunks int
-		description   string
+		description    string
 		validateChunks func(*testing.T, []types.Chunk)
 	}{
 		{
@@ -79,9 +79,9 @@ func TestGroupFilesIntoChunks(t *testing.T) {
 		{
 			name: "mix of large and small files",
 			files: []FileObject{
-				{FileKey: "large1.parquet", Size: 3 * 1024 * 1024 * 1024}, // 3GB
-				{FileKey: "small1.csv", Size: 500 * 1024 * 1024},          // 500MB
-				{FileKey: "small2.csv", Size: 400 * 1024 * 1024},          // 400MB
+				{FileKey: "large1.parquet", Size: 3 * 1024 * 1024 * 1024},   // 3GB
+				{FileKey: "small1.csv", Size: 500 * 1024 * 1024},            // 500MB
+				{FileKey: "small2.csv", Size: 400 * 1024 * 1024},            // 400MB
 				{FileKey: "large2.parquet", Size: 2.5 * 1024 * 1024 * 1024}, // 2.5GB
 			},
 			expectedChunks: 3, // large1, [small1,small2], large2
@@ -109,10 +109,10 @@ func TestGroupFilesIntoChunks(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			s := &S3{}
 			chunks := s.groupFilesIntoChunks(tt.files)
-			
+
 			// Convert types.Set to slice for easier testing
 			assert.Equal(t, tt.expectedChunks, chunks.Len(), tt.description)
-			
+
 			if tt.validateChunks != nil && chunks.Len() > 0 {
 				// Use Array() to convert Set to slice
 				chunkSlice := chunks.Array()
@@ -170,11 +170,11 @@ func TestChunkIteratorTypes(t *testing.T) {
 				Min: tt.chunkMin,
 				Max: nil,
 			}
-			
+
 			// Simulate the type checking logic from ChunkIterator
 			var fileKeys []string
 			var err error
-			
+
 			switch v := chunk.Min.(type) {
 			case []string:
 				fileKeys = v
@@ -191,7 +191,7 @@ func TestChunkIteratorTypes(t *testing.T) {
 			default:
 				err = assert.AnError
 			}
-			
+
 			if tt.expectError {
 				assert.Error(t, err, tt.description)
 			} else {
@@ -259,18 +259,18 @@ func TestIncrementalSyncFiltering(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := &S3{}
-			
+
 			// Use filterFilesByCursor which is the actual implementation
 			filtered := s.filterFilesByCursor(tt.files, tt.cursorTimestamp)
-			
+
 			assert.Equal(t, tt.expectedCount, len(filtered), "filtered file count mismatch")
-			
+
 			// Verify expected files
 			filteredKeys := make([]string, len(filtered))
 			for i, f := range filtered {
 				filteredKeys[i] = f.FileKey
 			}
-			
+
 			for _, expectedFile := range tt.expectedFiles {
 				assert.Contains(t, filteredKeys, expectedFile, "expected file not in results")
 			}
@@ -318,9 +318,9 @@ func TestCursorTimestampComparison(t *testing.T) {
 			files := []FileObject{
 				{FileKey: "test.csv", LastModified: tt.fileTimestamp},
 			}
-			
+
 			filtered := s.filterFilesByCursor(files, tt.cursorTimestamp)
-			
+
 			if tt.shouldInclude {
 				assert.Len(t, filtered, 1, "file should be included")
 			} else {
@@ -340,7 +340,7 @@ func TestParserConfigGetters(t *testing.T) {
 		}
 		err := config.Validate()
 		require.NoError(t, err)
-		
+
 		csvConfig := config.GetCSVConfig()
 		assert.NotNil(t, csvConfig)
 		assert.Equal(t, ",", csvConfig.Delimiter)
@@ -348,7 +348,7 @@ func TestParserConfigGetters(t *testing.T) {
 		assert.True(t, csvConfig.HasHeader)
 		assert.Equal(t, 0, csvConfig.SkipRows)
 	})
-	
+
 	t.Run("GetJSONConfig returns correct config", func(t *testing.T) {
 		config := &Config{
 			BucketName: "test-bucket",
@@ -357,12 +357,12 @@ func TestParserConfigGetters(t *testing.T) {
 		}
 		err := config.Validate()
 		require.NoError(t, err)
-		
+
 		jsonConfig := config.GetJSONConfig()
 		assert.NotNil(t, jsonConfig)
 		assert.True(t, jsonConfig.LineDelimited)
 	})
-	
+
 	t.Run("GetParquetConfig returns correct config", func(t *testing.T) {
 		config := &Config{
 			BucketName: "test-bucket",
@@ -371,7 +371,7 @@ func TestParserConfigGetters(t *testing.T) {
 		}
 		err := config.Validate()
 		require.NoError(t, err)
-		
+
 		parquetConfig := config.GetParquetConfig()
 		assert.NotNil(t, parquetConfig)
 		assert.True(t, parquetConfig.StreamingEnabled)
@@ -384,7 +384,7 @@ func TestStateManagement(t *testing.T) {
 		s := &S3{}
 		assert.Equal(t, types.StreamType, s.StateType())
 	})
-	
+
 	t.Run("setup state initializes correctly", func(t *testing.T) {
 		s := &S3{}
 		state := &types.State{
@@ -407,7 +407,7 @@ func TestMaxConnectionsAndRetries(t *testing.T) {
 		}
 		assert.Equal(t, 8, s.MaxConnections())
 	})
-	
+
 	t.Run("MaxRetries returns config value", func(t *testing.T) {
 		s := &S3{
 			config: &Config{
@@ -422,24 +422,24 @@ func TestMaxConnectionsAndRetries(t *testing.T) {
 func TestCDCNotSupported(t *testing.T) {
 	s := &S3{}
 	ctx := context.Background()
-	
+
 	t.Run("CDCSupported returns false", func(t *testing.T) {
 		assert.False(t, s.CDCSupported())
 	})
-	
+
 	t.Run("PreCDC returns error", func(t *testing.T) {
 		err := s.PreCDC(ctx, []types.StreamInterface{})
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "CDC is not supported")
 	})
-	
+
 	t.Run("StreamChanges returns error", func(t *testing.T) {
 		stream := types.NewStream("test", "s3", nil)
 		err := s.StreamChanges(ctx, stream.Wrap(0), nil)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "CDC is not supported")
 	})
-	
+
 	t.Run("PostCDC returns error", func(t *testing.T) {
 		stream := types.NewStream("test", "s3", nil)
 		err := s.PostCDC(ctx, stream.Wrap(0), true, "reader-1")
@@ -447,4 +447,3 @@ func TestCDCNotSupported(t *testing.T) {
 		assert.Contains(t, err.Error(), "CDC is not supported")
 	})
 }
-

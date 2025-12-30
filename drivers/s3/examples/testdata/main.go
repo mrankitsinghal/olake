@@ -85,8 +85,9 @@ func generateUsers(baseDate time.Time, count int) []User {
 			Email:     fmt.Sprintf("user%d@example.com", i+1),
 			FirstName: fmt.Sprintf("First%d", i+1),
 			LastName:  fmt.Sprintf("Last%d", i+1),
-			Phone:     fmt.Sprintf("+1-%03d-%03d-%04d", rand.Intn(900)+100, rand.Intn(900)+100, rand.Intn(9000)+1000), //nosec G404
-			Address:   fmt.Sprintf("%d Main St, City %d", rand.Intn(9999)+1, i%100),                                   //nosec G404
+			//nosec G404 - math/rand is acceptable for test data generation
+			Phone:     fmt.Sprintf("+1-%03d-%03d-%04d", rand.Intn(900)+100, rand.Intn(900)+100, rand.Intn(9000)+1000),
+			Address:   fmt.Sprintf("%d Main St, City %d", rand.Intn(9999)+1, i%100), //nosec G404
 			CreatedAt: baseDate.Add(time.Duration(i%8760) * time.Hour),
 			UpdatedAt: baseDate.Add(time.Duration(i%8760)*time.Hour + 30*time.Minute),
 			Status:    statuses[rand.Intn(len(statuses))], //nosec G404

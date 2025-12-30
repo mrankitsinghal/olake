@@ -327,13 +327,13 @@ func (s *S3) withFileReader(ctx context.Context, fileKey string, callback func(i
 	reader, _, err := s.getFileReader(ctx, fileKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get file reader: %w", err)
+	}
+	defer func() {
+		if closer, ok := reader.(io.Closer); ok {
+			closer.Close()
 		}
-		defer func() {
-			if closer, ok := reader.(io.Closer); ok {
-				closer.Close()
-			}
-		}()
-		
+	}()
+
 	return callback(reader)
 }
 
@@ -343,14 +343,14 @@ func (s *S3) withParquetReader(ctx context.Context, fileKey string, fileSize int
 	parquetReader, parquetSize, err := s.getParquetReaderAt(ctx, fileKey, fileSize)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get Parquet reader: %w", err)
+	}
+	defer func() {
+		if closer, ok := parquetReader.(io.Closer); ok {
+			closer.Close()
 		}
-		defer func() {
-			if closer, ok := parquetReader.(io.Closer); ok {
-				closer.Close()
-			}
-		}()
-		
-		// Create a wrapper that implements both io.ReaderAt and provides size info
+	}()
+
+	// Create a wrapper that implements both io.ReaderAt and provides size info
 	wrapper := parser.NewParquetReaderWrapper(parquetReader, parquetSize)
 	return callback(wrapper)
 }
@@ -432,7 +432,7 @@ func (s *S3) getFileReader(ctx context.Context, key string) (io.Reader, int64, e
 // Returns (readerAt, fileSize, error)
 func (s *S3) getParquetReaderAt(ctx context.Context, key string, fileSize int64) (io.ReaderAt, int64, error) {
 	parquetConfig := s.config.GetParquetConfig()
-	
+
 	if parquetConfig.StreamingEnabled && fileSize > 0 {
 		// Use S3 range requests for streaming (memory-efficient)
 		logger.Debugf("Using S3 range requests for Parquet file: %s", key)

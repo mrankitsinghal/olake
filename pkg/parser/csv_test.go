@@ -413,7 +413,7 @@ func TestCSVParser_StreamRecords_TypeConversion(t *testing.T) {
 	reader := strings.NewReader(csvData)
 
 	records := []map[string]any{}
-	callback := func(ctx context.Context, record map[string]any) error {
+	callback := func(_ context.Context, record map[string]any) error {
 		records = append(records, record)
 		return nil
 	}

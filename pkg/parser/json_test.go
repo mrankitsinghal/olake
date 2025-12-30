@@ -200,7 +200,7 @@ func TestJSONParser_StreamRecords_TypeConsistency(t *testing.T) {
 	reader := strings.NewReader(jsonlData)
 
 	records := []map[string]any{}
-	callback := func(ctx context.Context, record map[string]any) error {
+	callback := func(_ context.Context, record map[string]any) error {
 		records = append(records, record)
 		return nil
 	}

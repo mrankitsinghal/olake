@@ -93,4 +93,3 @@ func (r *S3RangeReader) ReadAt(p []byte, off int64) (n int, err error) {
 func (r *S3RangeReader) Size() int64 {
 	return r.size
 }
-

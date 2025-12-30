@@ -181,10 +181,10 @@ func TestFileFormatExtensions(t *testing.T) {
 			fileFormat:  FormatJSON,
 			compression: CompressionNone,
 			fileKeys: map[string]bool{
-				"data.json":  true,
-				"data.jsonl": true,
+				"data.json":   true,
+				"data.jsonl":  true,
 				"data.ndjson": false, // ndjson extension not explicitly supported
-				"data.xml":   false,
+				"data.xml":    false,
 			},
 		},
 		{
@@ -545,4 +545,3 @@ func TestConcurrentStateAccess(t *testing.T) {
 		}
 	})
 }
-
