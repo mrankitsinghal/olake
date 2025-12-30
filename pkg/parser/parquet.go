@@ -371,6 +371,7 @@ func decodeParquetDecimal(val pq.Value, scale int32) (decimal.Decimal, error) {
 			if uint(len(raw)) > (^uint(0))/8 {
 				return decimal.Zero, fmt.Errorf("decimal byte array too large for bit length calculation")
 			}
+			//nolint:gosec // G115: overflow check performed above
 			bitLen := uint(len(raw) * 8)
 			maxValue := new(big.Int).Lsh(big.NewInt(1), bitLen)
 			unscaled.Sub(unscaled, maxValue)
