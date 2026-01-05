@@ -9,6 +9,7 @@ import (
 
 	"github.com/datazip-inc/olake/types"
 	"github.com/datazip-inc/olake/utils/logger"
+	"github.com/datazip-inc/olake/utils/typeutils"
 )
 
 // JSONParser implements the Parser interface for JSON files
@@ -29,7 +30,7 @@ func NewJSONParser(config JSONConfig, stream *types.Stream) *JSONParser {
 // Supports JSONL (line-delimited), JSON Array, and single JSON object formats
 func (p *JSONParser) InferSchema(_ context.Context, reader io.Reader) (*types.Stream, error) {
 	logger.Debug("Inferring JSON schema from sample data")
-
+	//TODO : implement sampling of records from first and last files to get a more accurate schema
 	// Collect sample records using smart JSON format detection
 	maxSamples := 100
 
@@ -40,7 +41,7 @@ func (p *JSONParser) InferSchema(_ context.Context, reader io.Reader) (*types.St
 
 	data, err := io.ReadAll(limitedReader)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read JSON file: %w", err)
+		return nil, fmt.Errorf("failed to read JSON file: %s", err)
 	}
 
 	trimmed := bytes.TrimSpace(data)
@@ -51,28 +52,21 @@ func (p *JSONParser) InferSchema(_ context.Context, reader io.Reader) (*types.St
 	// Parse JSON based on detected format
 	sampleRecords, err := p.parseJSONContent(trimmed, maxSamples)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse JSON: %w", err)
+		return nil, fmt.Errorf("failed to parse JSON: %s", err)
 	}
 
 	if len(sampleRecords) == 0 {
 		return nil, fmt.Errorf("no records found in JSON file")
 	}
 
-	// Collect all unique field names across samples
-	fieldTypes := make(map[string][]interface{})
-	for _, record := range sampleRecords {
-		for fieldName, value := range record {
-			fieldTypes[fieldName] = append(fieldTypes[fieldName], value)
+	// Resolve schema one record at a time similar to MongoDB driver
+	for i, record := range sampleRecords {
+		if err := typeutils.Resolve(p.stream, record); err != nil {
+			return nil, fmt.Errorf("failed to resolve schema for record %d: %s", i, err)
 		}
 	}
 
-	// Infer type for each field
-	for fieldName, values := range fieldTypes {
-		dataType := inferJSONFieldType(values)
-		p.stream.UpsertField(fieldName, dataType, true) // Allow nulls by default
-	}
-
-	logger.Infof("Inferred schema with %d fields from JSON", len(fieldTypes))
+	logger.Infof("Inferred schema from JSON file")
 	return p.stream, nil
 }
 
@@ -101,7 +95,7 @@ func (p *JSONParser) StreamRecords(ctx context.Context, reader io.Reader, callba
 			}
 
 			if err := callback(ctx, record); err != nil {
-				return fmt.Errorf("failed to process record: %w", err)
+				return fmt.Errorf("failed to process record: %s", err)
 			}
 			recordCount++
 		}
@@ -112,7 +106,7 @@ func (p *JSONParser) StreamRecords(ctx context.Context, reader io.Reader, callba
 		// Read opening bracket
 		token, err := decoder.Token()
 		if err != nil {
-			return fmt.Errorf("failed to read JSON array start: %w", err)
+			return fmt.Errorf("failed to read JSON array start: %s", err)
 		}
 
 		// Verify it's an array
@@ -136,7 +130,7 @@ func (p *JSONParser) StreamRecords(ctx context.Context, reader io.Reader, callba
 			}
 
 			if err := callback(ctx, record); err != nil {
-				return fmt.Errorf("failed to process record: %w", err)
+				return fmt.Errorf("failed to process record: %s", err)
 			}
 			recordCount++
 		}
@@ -177,7 +171,7 @@ func (p *JSONParser) parseJSONArray(data []byte, maxSamples int) ([]map[string]i
 	// Read opening bracket
 	token, err := decoder.Token()
 	if err != nil {
-		return nil, fmt.Errorf("failed to read JSON array start: %w", err)
+		return nil, fmt.Errorf("failed to read JSON array start: %s", err)
 	}
 
 	// Verify it's an array
@@ -195,7 +189,7 @@ func (p *JSONParser) parseJSONArray(data []byte, maxSamples int) ([]map[string]i
 				logger.Warnf("Stopped reading JSON array after %d records due to error: %v", len(records), err)
 				break
 			}
-			return nil, fmt.Errorf("failed to decode JSON array element: %w", err)
+			return nil, fmt.Errorf("failed to decode JSON array element: %s", err)
 		}
 		records = append(records, record)
 	}
@@ -221,9 +215,9 @@ func (p *JSONParser) parseJSONLOrObject(data []byte, maxSamples int) ([]map[stri
 	if err := json.Unmarshal(data, &singleRecord); err != nil {
 		// If both failed, return a more helpful error
 		if isJSONL {
-			return nil, fmt.Errorf("failed to parse as JSONL: %w", err)
+			return nil, fmt.Errorf("failed to parse as JSONL: %s", err)
 		}
-		return nil, fmt.Errorf("failed to parse as single JSON object or JSONL: %w", err)
+		return nil, fmt.Errorf("failed to parse as single JSON object or JSONL: %s", err)
 	}
 
 	logger.Debug("Parsed single JSON object")
@@ -259,82 +253,4 @@ func (p *JSONParser) tryParseJSONL(data []byte, maxSamples int) ([]map[string]in
 
 	// If we got multiple records, it's JSONL
 	return records, len(records) > 1, nil
-}
-
-// inferJSONFieldType infers the data type of a JSON field from sample values
-// FIXED: Always use Float64 for numeric values to avoid Int64/Float64 conflicts
-// since JSON doesn't distinguish between integers and floats
-func inferJSONFieldType(values []interface{}) types.DataType {
-	if len(values) == 0 {
-		return types.String
-	}
-
-	hasNumber := false
-	allBool := true
-	allObject := true
-	allArray := true
-	nonNullCount := 0
-
-	for _, value := range values {
-		if value == nil {
-			continue
-		}
-
-		nonNullCount++
-
-		switch value.(type) {
-		case bool:
-			hasNumber = false
-			allObject = false
-			allArray = false
-		case float64:
-			// JSON numbers are always decoded as float64
-			// Always treat as Float64 to avoid schema conflicts
-			hasNumber = true
-			allBool = false
-			allObject = false
-			allArray = false
-		case string:
-			hasNumber = false
-			allBool = false
-			allObject = false
-			allArray = false
-		case map[string]interface{}:
-			hasNumber = false
-			allBool = false
-			allArray = false
-		case []interface{}:
-			hasNumber = false
-			allBool = false
-			allObject = false
-		default:
-			// Unknown type, mark all as false
-			hasNumber = false
-			allBool = false
-			allObject = false
-			allArray = false
-		}
-	}
-
-	// If no non-null values found, default to string
-	if nonNullCount == 0 {
-		return types.String
-	}
-
-	// Determine type based on what values were seen
-	// Priority: Bool > Float64 (for any number) > Object/Array > String
-	if allBool {
-		return types.Bool
-	}
-	if hasNumber {
-		// Always use Float64 for JSON numbers to avoid Int64/Float64 conflicts
-		// This is safer because JSON doesn't distinguish between int and float
-		return types.Float64
-	}
-	if allObject || allArray {
-		return types.String // Complex types should be stored as JSON string
-	}
-
-	// Default to string
-	return types.String
 }
